@@ -1,0 +1,47 @@
+{
+  "name": "@ob/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev -p 3002",
+    "build": "cross-env NEXT_BUILD_DIR=.next-build next build",
+    "start": "cross-env NEXT_BUILD_DIR=.next-build next start -p 3002",
+    "clean": "rm -rf .next",
+    "build:same-dir": "next build"
+  },
+  "dependencies": {
+    "@ob/ai": "workspace:*",
+    "@ob/blog": "workspace:*",
+    "@ob/core": "workspace:*",
+    "@ob/db": "workspace:*",
+    "@ob/gmb": "workspace:*",
+    "@ob/jobs": "workspace:*",
+    "@ob/kb": "workspace:*",
+    "@ob/pipeline": "workspace:*",
+    "@ob/publish": "workspace:*",
+    "@ob/seo": "workspace:*",
+    "@ob/social": "workspace:*",
+    "@ob/companion": "workspace:*",
+    "@ob/voice": "workspace:*",
+    "@tiptap/extension-link": "^3.31.3",
+    "@tiptap/react": "^3.31.3",
+    "@tiptap/starter-kit": "^3.31.3",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.38.3",
+    "ioredis": "^5.4.2",
+    "jose": "^6.2.12",
+    "next": "^15.1.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tiptap-markdown": "^0.9.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "@electric-sql/pglite-pgvector": "0.0.9",
+    "@types/react": "^19.0.2",
+    "@types/react-dom": "^19.0.2",
+    "typescript": "^5.7.2"
+  }
+}

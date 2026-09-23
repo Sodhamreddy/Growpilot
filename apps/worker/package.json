@@ -1,0 +1,33 @@
+{
+  "name": "@ob/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx src/index.ts",
+    "dev:watch": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "clean": "rm -rf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@ob/ai": "workspace:*",
+    "@ob/core": "workspace:*",
+    "@ob/db": "workspace:*",
+    "@ob/jobs": "workspace:*",
+    "@ob/kb": "workspace:*",
+    "@ob/pipeline": "workspace:*",
+    "@ob/seo": "workspace:*",
+    "@ob/voice": "workspace:*",
+    "bullmq": "^5.34.0",
+    "dotenv": "^17.4.2",
+    "drizzle-orm": "^0.38.3",
+    "ioredis": "^5.4.2",
+    "@ob/publish": "workspace:*",
+    "@ob/blog": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}

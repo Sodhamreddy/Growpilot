@@ -1,0 +1,6 @@
+# Pinned, because a rendering service that silently changes behaviour between
+# installs is worse than one that fails to install.
+crawl4ai==0.9.3
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+pydantic==2.12.0

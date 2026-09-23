@@ -1,0 +1,41 @@
+{
+  "name": "our-brand-platform",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "db:generate": "pnpm --filter=@ob/db generate",
+    "db:migrate": "pnpm --filter=@ob/db migrate",
+    "db:reset": "pnpm --filter=@ob/db reset",
+    "db:seed": "pnpm --filter=@ob/db seed",
+    "build": "pnpm -r --filter=./packages/** build && pnpm --filter=@ob/web build",
+    "dev": "concurrently --names \"web,worker,crawler\" --prefix-colors \"cyan,magenta,green\" --kill-others-on-fail \"pnpm --filter=@ob/web dev\" \"pnpm --filter=@ob/worker dev\" \"pnpm dev:crawler\"",
+    "dev:crawler": "node scripts/run-crawler.mjs",
+    "dev:worker": "pnpm --filter=@ob/worker dev",
+    "infra:down": "docker compose down",
+    "infra:up": "docker compose up -d",
+    "lint": "eslint . --max-warnings=0",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -b --pretty",
+    "dev:web": "pnpm --filter=@ob/web dev",
+    "backfill": "tsx scripts/backfill.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@ob/db": "workspace:*",
+    "@ob/pipeline": "workspace:*",
+    "@ob/social": "workspace:*",
+    "@types/node": "^22.10.2",
+    "concurrently": "^10.0.5",
+    "cross-env": "^10.1.0",
+    "eslint": "^9.17.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vitest": "^2.1.8"
+  }
+}

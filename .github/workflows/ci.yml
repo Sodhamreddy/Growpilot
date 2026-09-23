@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ob
+          POSTGRES_PASSWORD: ob
+          POSTGRES_DB: ourbrand
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ob -d ourbrand"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://ob:ob@localhost:5432/ourbrand
+      REDIS_URL: redis://localhost:6379
+      # CI-only values. Never reuse these anywhere real.
+      CREDENTIAL_ENCRYPTION_KEY: aGVsbG93b3JsZGhlbGxvd29ybGRoZWxsb3dvcmxkMTI=
+      AUTH_SECRET: ci-only-secret-not-used-in-any-real-deployment
+      # Every AI call resolves to the deterministic local provider: the suite
+      # runs with no credentials and makes no network requests.
+      AI_MOCK: 1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck packages and worker
+        run: pnpm exec tsc -b
+
+      - name: Typecheck web
+        run: pnpm --filter=@ob/web exec tsc --noEmit
+
+      - name: Unit tests
+        run: pnpm exec vitest run
+
+      - name: Migrate
+        run: pnpm db:migrate
+
+      - name: Seed
+        run: pnpm db:seed
+
+      - name: Build web
+        run: pnpm --filter=@ob/web build

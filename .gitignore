@@ -1,3 +1,32 @@
-.sites-runtime/
 node_modules/
+dist/
+.next/
+out/
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+coverage/
+.sites-runtime/
 *.tar.gz
+.DS_Store
+
+# Throwaway Next build dir used for verification runs
+.next-verify/
+
+# Python rendering service
+services/crawler/.venv/
+services/crawler/__pycache__/
+
+# Production build output, kept apart from the dev server's .next
+apps/web/.next-build/
+
+# Local dev noise, not source.
+#
+# .devlogs holds captured stdout from `npm run dev`; .next-stale is a build
+# directory left behind when a dev server is killed mid-write. Both are
+# regenerated locally and neither belongs in history — the build output alone
+# was 133 files.
+.devlogs/
+.next-stale/
+apps/web/.next-stale/

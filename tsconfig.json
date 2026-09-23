@@ -1,0 +1,19 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/db" },
+    { "path": "./packages/ai" },
+    { "path": "./packages/seo" },
+    { "path": "./packages/kb" },
+    { "path": "./packages/voice" },
+    { "path": "./packages/jobs" },
+    { "path": "./packages/pipeline" },
+    { "path": "./packages/publish" },
+    { "path": "./packages/blog" },
+    { "path": "./packages/social" },
+    { "path": "./packages/companion" },
+    { "path": "./packages/gmb" },
+    { "path": "./apps/worker" }
+  ]
+}
