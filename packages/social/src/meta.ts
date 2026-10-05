@@ -47,7 +47,11 @@
  * nobody here made. Matching the app's own setting (Settings → Advanced →
  * Upgrade API version) keeps the two from drifting.
  */
-const GRAPH = "https://graph.facebook.com/v24.0";
+/*
+ * The Graph API base. Overridable only so a test can point the publisher at a
+ * local fake instead of real pages; nothing sets it in normal running.
+ */
+const GRAPH = process.env.META_GRAPH_URL?.trim() || "https://graph.facebook.com/v24.0";
 
 export interface MetaTokens {
   accessToken: string;
@@ -542,4 +546,169 @@ export async function fetchRecentInstagramPosts(
     );
   }
   return rows;
+}
+
+// ─── Publishing ─────────────────────────────────────────────────────────────
+
+/**
+ * The permissions each network needs to publish, on top of reading.
+ *
+ * Granted only to people with a role on the Meta app until App Review
+ * approves them for everyone; the connection records what was actually
+ * granted, so the schedule page can say which networks will work.
+ */
+export const PUBLISH_PERMISSIONS = {
+  facebook: ["pages_manage_posts", "pages_read_engagement"],
+  instagram: ["instagram_content_publish", "instagram_basic"],
+} as const;
+
+export interface PublishResult {
+  /** The network's own id for the post. */
+  id: string;
+  /** Where the published post can be seen. */
+  url: string;
+}
+
+/**
+ * A publishing failure, in words about posting, and whether waiting could fix it.
+ *
+ * Separate from `describeGraphError`, whose wording is about reading insights.
+ * The line drawn is different too: a post is retried only when Meta says the
+ * problem is its own and temporary. Anything else (a refused permission, an
+ * expired token, a rejected image) needs a person, and retrying it five times
+ * only delays saying so.
+ */
+export function describePublishError(body: unknown, httpStatus = 400): GraphFailure {
+  const error = (body as {
+    error?: { code?: number; message?: string; error_user_msg?: string; is_transient?: boolean };
+  })?.error;
+  const code = error?.code;
+  const detail = (error?.error_user_msg || error?.message || "").trim();
+
+  if (code === 190) {
+    return { message: "The Facebook connection has expired. Reconnect it in step 5, then try again.", permanent: true };
+  }
+  if (code === 10 || (typeof code === "number" && code >= 200 && code < 300)) {
+    return {
+      message:
+        "Meta has not allowed this app to post to that account. Reconnect and allow posting. " +
+        "Until the app passes App Review, only people with a role on the Meta app can post through it.",
+      permanent: true,
+    };
+  }
+  if (code === 1 || code === 2 || code === 4 || code === 17 || code === 32 || code === 613 || error?.is_transient
+      || (!error && httpStatus >= 500)) {
+    return { message: "Meta is busy or limiting requests. It will be tried again shortly.", permanent: false };
+  }
+  if (code === 368) {
+    return { message: `Meta blocked this post${detail ? `: ${detail}` : "."}`, permanent: true };
+  }
+  return { message: detail ? `Meta refused the post: ${detail}` : "Meta refused the post.", permanent: true };
+}
+
+/**
+ * POST to Graph for publishing.
+ *
+ * `final` marks the call that makes a post public. If that one times out or
+ * the connection drops, the post may have gone out anyway, and Graph has no
+ * way to make a retry safe. So it is not retried: the person is told to look
+ * before trying again, because a missed post is easier to fix than a double.
+ */
+async function graphPost<T>(
+  path: string,
+  body: FormData | URLSearchParams,
+  fetcher: Fetcher,
+  { final = false, timeoutMs = 60_000 }: { final?: boolean; timeoutMs?: number } = {},
+): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetcher(`${GRAPH}${path}`, { method: "POST", body, signal: AbortSignal.timeout(timeoutMs) });
+  } catch (err) {
+    if (!final) throw err;
+    throw new GraphError({
+      message: "Meta did not answer in time, so the post may or may not have gone out. Check the account before trying again.",
+      permanent: true,
+    });
+  }
+  const parsed: unknown = await res.json().catch(() => ({}));
+  if (!res.ok || (parsed as { error?: unknown }).error) throw new GraphError(describePublishError(parsed, res.status));
+  return parsed as T;
+}
+
+/** What the connected person actually granted. */
+export async function grantedPermissions(userToken: string, fetcher: Fetcher = fetch): Promise<string[]> {
+  const body = await graph<{ data?: { permission: string; status: string }[] }>(
+    "/me/permissions", { access_token: userToken }, fetcher,
+  );
+  return (body.data ?? []).filter((p) => p.status === "granted").map((p) => p.permission);
+}
+
+/**
+ * A photo post on a Facebook Page.
+ *
+ * The image goes up as the file itself rather than a link, so a post can be
+ * published from a machine Facebook cannot reach, local development included.
+ */
+export async function publishFacebookPhoto(
+  page: { id: string; accessToken: string },
+  post: { message: string; image: Uint8Array; mimeType: string },
+  fetcher: Fetcher = fetch,
+): Promise<PublishResult> {
+  const form = new FormData();
+  form.set("access_token", page.accessToken);
+  form.set("message", post.message);
+  form.set("published", "true");
+  form.set("source", new Blob([post.image], { type: post.mimeType }), "post-image");
+  const body = await graphPost<{ id: string; post_id?: string }>(`/${page.id}/photos`, form, fetcher, { final: true });
+  const postId = body.post_id ?? body.id;
+  return { id: postId, url: `https://www.facebook.com/${postId}` };
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * A photo post on an Instagram professional account.
+ *
+ * Instagram publishes in two steps: a container that fetches the image from
+ * a public JPEG address, then a publish of that container once Instagram has
+ * processed it. Publishing before processing finishes fails, so the
+ * container's status is polled first.
+ */
+export async function publishInstagramPhoto(
+  account: { instagramId: string; accessToken: string },
+  post: { caption: string; imageUrl: string },
+  fetcher: Fetcher = fetch,
+  wait: (ms: number) => Promise<void> = sleep,
+): Promise<PublishResult> {
+  const token = account.accessToken;
+  const container = await graphPost<{ id: string }>(
+    `/${account.instagramId}/media`,
+    new URLSearchParams({ image_url: post.imageUrl, caption: post.caption, access_token: token }),
+    fetcher,
+  );
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const state = await graph<{ status_code?: string }>(`/${container.id}`, { fields: "status_code", access_token: token }, fetcher);
+    if (!state.status_code || state.status_code === "FINISHED") break;
+    if (state.status_code === "ERROR" || state.status_code === "EXPIRED") {
+      throw new GraphError({ message: "Instagram could not process the image. Check it is a clear JPEG and try again.", permanent: true });
+    }
+    if (attempt === 9) throw new GraphError({ message: "Instagram is still processing the image. Try again shortly.", permanent: false });
+    await wait(3000);
+  }
+
+  const published = await graphPost<{ id: string }>(
+    `/${account.instagramId}/media_publish`,
+    new URLSearchParams({ creation_id: container.id, access_token: token }),
+    fetcher,
+    { final: true },
+  );
+
+  // The permalink is a nicety; a post that published without one is still published.
+  let url = "https://www.instagram.com/";
+  try {
+    const media = await graph<{ permalink?: string }>(`/${published.id}`, { fields: "permalink", access_token: token }, fetcher);
+    if (media.permalink) url = media.permalink;
+  } catch { /* keep the fallback */ }
+  return { id: published.id, url };
 }

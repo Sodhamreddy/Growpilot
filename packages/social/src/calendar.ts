@@ -63,6 +63,14 @@ export interface PlanOptions {
    * Nothing is scheduled before this day of the month.
    */
   notBefore?: number;
+  /**
+   * Days already holding a post that stays, such as one whose copy is written.
+   *
+   * They count towards the target and are not filled again. Replanning used
+   * to release every post in the month, which was harmless while nothing
+   * could be written, and discards approved work now that it can.
+   */
+  occupied?: number[];
 }
 
 const DEFAULT_TARGET = 13;
@@ -125,7 +133,8 @@ export function planMonth(
   const total = daysInMonth(monthKey);
   const warnings: string[] = [];
 
-  const taken = new Set<number>();
+  const taken = new Set<number>(options.occupied ?? []);
+  const kept = taken.size;
   const slots: CalendarSlot[] = [];
 
   // ── Anchored: topics whose date falls inside this month ──
@@ -163,7 +172,7 @@ export function planMonth(
   }
 
   // ── Filler: evergreen topics, recommended first ──
-  const need = Math.max(0, target - slots.length);
+  const need = Math.max(0, target - kept - slots.length);
   const evergreen = candidates
     .filter((c) => !c.postDate)
     .sort((a, b) => Number(b.recommended) - Number(a.recommended));
@@ -230,8 +239,8 @@ export function planMonth(
   if (slots.length >= 6 && formats.length < 3) {
     warnings.push(`Only ${formats.length} format${formats.length === 1 ? "" : "s"} across the month.`);
   }
-  if (slots.length < target) {
-    warnings.push(`${slots.length} posts planned, ${target} wanted.`);
+  if (slots.length + kept < target) {
+    warnings.push(`${slots.length + kept} posts planned, ${target} wanted.`);
   }
 
   return {

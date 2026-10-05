@@ -32,6 +32,8 @@ import { processResearchKeywords, type ResearchPayload } from "./processors/blog
 import { processBuildContentPlan, type PlanPayload } from "./processors/blog/plan.js";
 import { processPublish, type PublishPayload } from "./processors/blog/publish.js";
 import { processSocialInsights } from "./processors/social/insights.js";
+import { processPublishSocialPost } from "./processors/social/publish.js";
+import { processReviewsSync, processReviewsSweep, scheduleReviewsSweep } from "./processors/gmb/reviews.js";
 import {
   processScheduledRun, restoreSchedules, type ScheduledRunPayload,
 } from "./processors/blog/scheduled.js";
@@ -57,9 +59,12 @@ const PROCESSORS: Record<string, Processor> = {
   [JOBS.runQualityGates]: processRunQualityGates as Processor,
   [JOBS.publishArticle]: processPublish as Processor,
   [JOBS.scheduledContentRun]: processScheduledRun as Processor,
+  [JOBS.syncReviews]: processReviewsSync as Processor,
+  [JOBS.reviewsSweep]: processReviewsSweep as Processor,
   // The job name has existed since the queues were defined; this is the
   // processor it was reserved for.
   [JOBS.ingestMetrics]: processSocialInsights as Processor,
+  [JOBS.publishSocialPost]: processPublishSocialPost as Processor,
 };
 
 /** Wall-clock ceiling per job, so a hung provider cannot occupy a slot forever. */
@@ -197,6 +202,11 @@ async function main(): Promise<void> {
    * that are configured but firing nowhere.
    */
   await restoreSchedules(wc);
+  try {
+    await scheduleReviewsSweep(wc);
+  } catch (err) {
+    wc.logger.error("Could not schedule the reviews sweep", { error: String(err) });
+  }
 
   const workers: Worker[] = [];
 

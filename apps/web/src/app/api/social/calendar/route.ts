@@ -7,6 +7,7 @@ import { repo, socialCategories, socialTopics, socialMonths } from "@ob/db";
 import { planMonth, monthToPlan, type CalendarCandidate } from "@ob/social";
 import { route, parseBody } from "@/lib/api";
 import { db } from "@/lib/services";
+import { dragBlocker, dropBlocker } from "@/lib/social-calendar";
 
 /**
  * POST /api/social/calendar — lay out a month from the pool.
@@ -94,17 +95,36 @@ export const POST = route(async (ctx, req) => {
       recommended: r.recommended,
     }));
 
+  /*
+   * Posts already written for this month stay where they are.
+   *
+   * Their copy was written against a date, and an approved one carries a
+   * person's sign-off. Replanning works around them rather than returning them
+   * to the pool, the same rule unscheduling already follows.
+   */
+  const kept = await database
+    .select({ postDate: socialTopics.postDate })
+    .from(socialTopics)
+    .innerJoin(socialMonths, eq(socialMonths.id, socialTopics.monthId))
+    .where(and(
+      eq(socialTopics.workspaceId, ctx.workspaceId),
+      eq(socialMonths.businessId, body.businessId),
+      eq(socialMonths.monthKey, monthKey),
+      inArray(socialTopics.status, ["written", "approved", "published"]),
+    ));
+
   const plan = planMonth(candidates, {
     monthKey,
     ...(body.target ? { target: body.target } : {}),
     notBefore,
+    occupied: kept.flatMap((k) => (k.postDate ? [k.postDate.getUTCDate()] : [])),
   });
 
   if (body.mode === "preview") {
-    return { ok: true, monthKey, plan, available: candidates.length };
+    return { ok: true, monthKey, plan, available: candidates.length, kept: kept.length };
   }
 
-  if (plan.slots.length === 0) {
+  if (plan.slots.length === 0 && kept.length === 0) {
     throw new AppError(
       "validation_failed",
       "There is nothing to schedule. Generate some topics first.",
@@ -138,14 +158,15 @@ export const POST = route(async (ctx, req) => {
       })
       .returning();
 
-    // Release anything previously scheduled into this month, so a replan does
-    // not leave last attempt's topics stranded as scheduled.
+    // Release what the last attempt scheduled but nobody has written yet, so a
+    // replan does not leave it stranded. Written posts stay (see `kept`).
     await tx
       .update(socialTopics)
       .set({ monthId: null, status: "idea", postDate: null, updatedAt: new Date() })
       .where(and(
         eq(socialTopics.workspaceId, ctx.workspaceId),
         eq(socialTopics.monthId, month!.id),
+        eq(socialTopics.status, "scheduled"),
       ));
 
     for (const slot of plan.slots) {
@@ -179,6 +200,75 @@ export const POST = route(async (ctx, req) => {
   });
 
   return { ok: true, monthKey, monthId, plan };
+});
+
+/**
+ * PATCH — move posts to other days of their month.
+ *
+ * All moves in one request and one transaction. They come from a person
+ * rearranging a month and confirming it as a whole, and half of an
+ * arrangement applied is an arrangement nobody made.
+ */
+const moveSchema = z.object({
+  moves: z.array(z.object({
+    topicId: z.string().uuid(),
+    /** "YYYY-MM-DD". */
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  })).min(1).max(62),
+});
+
+export const PATCH = route(async (ctx, req) => {
+  requireRole(ctx, "editor");
+  const body = await parseBody(req, moveSchema);
+  const database = db();
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  const rows = await database
+    .select({
+      id: socialTopics.id,
+      title: socialTopics.title,
+      status: socialTopics.status,
+      occasion: socialTopics.occasion,
+      monthKey: socialMonths.monthKey,
+    })
+    .from(socialTopics)
+    .innerJoin(socialMonths, eq(socialMonths.id, socialTopics.monthId))
+    .where(and(
+      eq(socialTopics.workspaceId, ctx.workspaceId),
+      inArray(socialTopics.id, body.moves.map((m) => m.topicId)),
+    ));
+  const byId = new Map(rows.map((r) => [r.id, r]));
+
+  for (const move of body.moves) {
+    const topic = byId.get(move.topicId);
+    if (!topic) {
+      throw new AppError("not_found", "One of those posts is not on a calendar in this workspace.", {
+        retryable: false,
+      });
+    }
+    const blocker = dragBlocker(topic) ?? dropBlocker(move.date, { monthKey: topic.monthKey, todayIso });
+    if (blocker) {
+      throw new AppError("conflict", `${topic.title}: ${blocker}`, { retryable: false });
+    }
+  }
+
+  await database.transaction(async (tx) => {
+    for (const move of body.moves) {
+      await tx
+        .update(socialTopics)
+        .set({ postDate: new Date(`${move.date}T12:00:00Z`), updatedAt: new Date() })
+        .where(and(eq(socialTopics.workspaceId, ctx.workspaceId), eq(socialTopics.id, move.topicId)));
+    }
+  });
+
+  await repo.writeAudit(database, ctx, {
+    action: "social.posts_moved",
+    entityType: "social_month",
+    entityId: rows[0]?.monthKey,
+    after: { moves: body.moves },
+  });
+
+  return { ok: true, moved: body.moves.length };
 });
 
 /** DELETE — unschedule a month, returning its topics to the pool. */

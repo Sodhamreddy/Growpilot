@@ -190,6 +190,20 @@ export class QueueRegistry {
   }
 
   /** Remove a repeating job. Safe to call when none is registered. */
+  /**
+   * Remove a one-off job that has not run yet, by the idempotency key it was
+   * enqueued with. For a delayed job being moved or cancelled; a job already
+   * running is left to finish, and one that finished is simply gone.
+   */
+  async removeJob(queue: QueueName, idempotencyKey: string): Promise<boolean> {
+    const job = await this.get(queue).getJob(toJobId(idempotencyKey));
+    if (!job) return false;
+    const state = await job.getState().catch(() => "unknown");
+    if (state === "active") return false;
+    await job.remove();
+    return true;
+  }
+
   async unschedule(queue: QueueName, key: string): Promise<void> {
     const q = this.get(queue);
     for (const existing of await q.getJobSchedulers()) {
@@ -275,6 +289,11 @@ export const JOBS = {
   generateArticle: "ai.generate-article",
   runQualityGates: "qa.run-gates",
   publishArticle: "publish.article",
+  publishSocialPost: "publish.social-post",
+  /** Read one client's Google reviews, then draft replies to the new ones. */
+  syncReviews: "analytics.reviews-sync",
+  /** Fires every few hours; queues a review sync for every client with a listing. */
+  reviewsSweep: "maintenance.reviews-sweep",
   ingestMetrics: "analytics.ingest",
   refreshContent: "maintenance.refresh",
   /** Fires on a schedule; fans out one plan job per client that is due. */

@@ -17,13 +17,23 @@ import { useRouter } from "next/navigation";
 export function MetaTokenConnect({
   connected,
   pageNames,
+  defaultOpen = false,
+  offerToken = true,
 }: {
   connected: boolean;
   /** What the stored connection currently reaches, for the connected state. */
   pageNames: string | null;
+  /** Start with the form showing, for when the sign-in button cannot work here. */
+  defaultOpen?: boolean;
+  /**
+   * Whether to offer the paste-a-token form at all. It is a developer's way
+   * round a server Meta cannot redirect to; on a public deployment customers
+   * connect with the sign-in button, and only Disconnect is shown here.
+   */
+  offerToken?: boolean;
 }) {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -141,6 +151,8 @@ export function MetaTokenConnect({
     );
   }
 
+  if (!offerToken) return null;
+
   return (
     <div className="metatoken">
       <button type="button" className="metatoken-toggle" onClick={() => setOpen(!open)}>
@@ -167,7 +179,8 @@ export function MetaTokenConnect({
             <li>
               Add these permissions: <code>pages_show_list</code>, <code>pages_read_engagement</code>,{" "}
               <code>read_insights</code>, <code>instagram_basic</code>,{" "}
-              <code>instagram_manage_insights</code>.
+              <code>instagram_manage_insights</code>, and to publish from the Schedule step,{" "}
+              <code>pages_manage_posts</code> and <code>instagram_content_publish</code>.
             </li>
             <li>Click <strong>Generate Access Token</strong> and approve the popup.</li>
             <li>Copy the token and paste it below.</li>

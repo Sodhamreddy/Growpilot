@@ -153,6 +153,9 @@ importers:
       '@ob/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@ob/gmb':
+        specifier: workspace:*
+        version: link:../../packages/gmb
       '@ob/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs
@@ -275,6 +278,9 @@ importers:
       '@ob/voice':
         specifier: workspace:*
         version: link:../voice
+      drizzle-orm:
+        specifier: ^0.38.3
+        version: 0.38.4(@electric-sql/pglite@0.5.8)(@types/react@19.3.0)(postgres@3.4.9)(react@19.3.0)
 
   packages/jobs:
     dependencies:
@@ -359,6 +365,9 @@ importers:
       '@ob/voice':
         specifier: workspace:*
         version: link:../voice
+      sharp:
+        specifier: ^0.35.4
+        version: 0.35.4(@types/node@22.20.2)
 
   packages/voice:
     dependencies:
@@ -3338,8 +3347,7 @@ snapshots:
 
   '@humanwhocodes/retry@0.4.3': {}
 
-  '@img/colour@1.1.0':
-    optional: true
+  '@img/colour@1.1.0': {}
 
   '@img/sharp-darwin-arm64@0.35.4':
     optionalDependencies:
@@ -4114,8 +4122,7 @@ snapshots:
 
   denque@2.1.0: {}
 
-  detect-libc@2.1.2:
-    optional: true
+  detect-libc@2.1.2: {}
 
   dom-serializer@2.0.0:
     dependencies:
@@ -4930,7 +4937,6 @@ snapshots:
       '@img/sharp-win32-ia32': 0.35.4
       '@img/sharp-win32-x64': 0.35.4
       '@types/node': 22.20.2
-    optional: true
 
   shebang-command@2.0.0:
     dependencies:

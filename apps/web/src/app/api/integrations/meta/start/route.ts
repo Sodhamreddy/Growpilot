@@ -34,9 +34,11 @@ const TTL_SECONDS = 600;
  *   instagram_basic          — resolve the Instagram account linked to a page.
  *   instagram_manage_insights— Instagram reach and engagement.
  *
- * Nothing that writes. This integration reads numbers; asking for publishing
- * permissions we do not use would make the consent screen alarming and slow
- * App Review down for no gain.
+ * Plus publishing, now that the Schedule step posts: pages_manage_posts for
+ * Page photos and instagram_content_publish for Instagram. Until App Review
+ * approves those, Meta grants them only to people with a role on the app,
+ * and the callback records what was actually granted so the schedule page
+ * can say which networks will work rather than failing at posting time.
  */
 const SCOPES = [
   "pages_show_list",
@@ -44,9 +46,15 @@ const SCOPES = [
   "read_insights",
   "instagram_basic",
   "instagram_manage_insights",
+  "pages_manage_posts",
+  "instagram_content_publish",
 ].join(",");
 
-export async function GET(): Promise<NextResponse> {
+/** Where a person may be sent back to. Internal pages only, never a full URL. */
+const RETURN_TO = new Set(["/social-insights", "/social/schedule"]);
+const RETURN_COOKIE = "ob_meta_return";
+
+export async function GET(req: Request): Promise<NextResponse> {
   const ctx = await requireTenant();
   const cfg = config();
 
@@ -81,6 +89,10 @@ export async function GET(): Promise<NextResponse> {
     path: "/",
     maxAge: TTL_SECONDS,
   });
+  const returnTo = new URL(req.url).searchParams.get("return") ?? "";
+  jar.set(RETURN_COOKIE, RETURN_TO.has(returnTo) ? returnTo : "/social-insights", {
+    httpOnly: true, secure: cfg.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: TTL_SECONDS,
+  });
 
   const authorize = new URL("https://www.facebook.com/v24.0/dialog/oauth");
   authorize.searchParams.set("client_id", cfg.META_APP_ID);
@@ -88,6 +100,8 @@ export async function GET(): Promise<NextResponse> {
   authorize.searchParams.set("response_type", "code");
   authorize.searchParams.set("scope", SCOPES);
   authorize.searchParams.set("state", state);
+  // Ask again for anything declined last time; Meta otherwise skips it silently.
+  authorize.searchParams.set("auth_type", "rerequest");
 
   return NextResponse.redirect(authorize.toString());
 }

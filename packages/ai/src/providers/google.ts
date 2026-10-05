@@ -1,7 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { AppError } from "@ob/core";
 import type {
-  AiProvider, EmbedRequest, EmbedResponse, GenerateRequest, GenerateResponse,
+  AiProvider, EmbedRequest, EmbedResponse, GenerateRequest, GenerateResponse, ImageRequest, ImageResponse,
 } from "../types.js";
 
 /**
@@ -99,6 +99,42 @@ export class GoogleProvider implements AiProvider {
   }
 
   /** Embeddings for the knowledge base (spec §4). */
+  async generateImage(req: ImageRequest, model: string, signal: AbortSignal): Promise<ImageResponse> {
+    const client = this.#getClient();
+    let res: Awaited<ReturnType<typeof client.models.generateContent>>;
+    try {
+      res = await client.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: req.prompt }] }],
+        config: {
+          responseModalities: ["IMAGE"],
+          imageConfig: { aspectRatio: req.aspectRatio },
+          abortSignal: signal,
+        },
+      });
+    } catch (err) {
+      throw translateImageError(err);
+    }
+
+    const part = res.candidates?.[0]?.content?.parts?.find((p) => p.inlineData?.data);
+    if (!part?.inlineData?.data) {
+      const reason = res.promptFeedback?.blockReason ?? res.candidates?.[0]?.finishReason;
+      throw new AppError(
+        "provider_error",
+        reason && reason !== "STOP"
+          ? "The image model declined this request. Adjust the image brief and try again."
+          : "The image model returned no image. Try again.",
+        { details: reason ? { reason } : {}, retryable: true },
+      );
+    }
+    return {
+      data: Buffer.from(part.inlineData.data, "base64"),
+      mimeType: part.inlineData.mimeType ?? "image/png",
+      provider: "google",
+      model,
+    };
+  }
+
   async embed(req: EmbedRequest, model: string): Promise<EmbedResponse> {
     const client = this.#getClient();
     try {
@@ -246,6 +282,27 @@ function safeParseJson(text: string): unknown {
     }
     return undefined;
   }
+}
+
+/**
+ * Image generation's own error reading.
+ *
+ * A free-tier key gets a 429 from the image model with a quota of zero, which
+ * the general mapping would call "rate limiting us, retrying shortly". That is
+ * false twice over: nothing retries, and waiting cannot help, because the free
+ * tier does not include the image model at all. Only billing changes it.
+ */
+export function translateImageError(err: unknown): AppError {
+  const message = String((err as { message?: string })?.message ?? "");
+  if (/free[_ ]?tier/i.test(message) && /quota/i.test(message)) {
+    return new AppError(
+      "provider_error",
+      "This Google API key cannot generate images: the free tier does not include the image model. " +
+        "Turn on billing for the key's Google Cloud project, then try again. Uploading an image works meanwhile.",
+      { cause: err, retryable: false, details: { reason: "image_model_not_in_free_tier" } },
+    );
+  }
+  return translateError(err);
 }
 
 /** Map SDK errors onto our typed errors so retry policy is uniform. */

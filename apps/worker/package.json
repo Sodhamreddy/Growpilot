@@ -25,7 +25,8 @@
     "drizzle-orm": "^0.38.3",
     "ioredis": "^5.4.2",
     "@ob/publish": "workspace:*",
-    "@ob/blog": "workspace:*"
+    "@ob/blog": "workspace:*",
+    "@ob/gmb": "workspace:*"
   },
   "devDependencies": {
     "tsx": "^4.19.2"

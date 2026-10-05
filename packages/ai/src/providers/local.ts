@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { deflateSync } from "node:zlib";
 import type {
-  AiProvider, EmbedRequest, EmbedResponse, GenerateRequest, GenerateResponse,
+  AiProvider, EmbedRequest, EmbedResponse, GenerateRequest, GenerateResponse, ImageRequest, ImageResponse,
 } from "../types.js";
 
 /**
@@ -57,6 +58,67 @@ export class LocalProvider implements AiProvider {
       provider: this.name,
     };
   }
+
+  /**
+   * A plain two-colour placeholder, so the image step runs offline.
+   *
+   * Deliberately obvious: a flat gradient with no picture and no text, sized
+   * to the requested ratio, so nobody mistakes it for a finished image.
+   */
+  async generateImage(req: ImageRequest): Promise<ImageResponse> {
+    const [w, h] = req.aspectRatio.split(":").map(Number) as [number, number];
+    const width = 400;
+    const height = Math.round((400 * (h || 5)) / (w || 4));
+    const seed = createHash("sha256").update(req.prompt).digest();
+    return {
+      data: gradientPng(width, height, [seed[0]!, seed[1]!, seed[2]!], [seed[3]!, seed[4]!, seed[5]!]),
+      mimeType: "image/png",
+      provider: this.name,
+      // Named for what it is, so a placeholder is never read as the real model's work.
+      model: "offline-placeholder",
+    };
+  }
+}
+
+/** A vertical two-colour gradient as a PNG, with no image library. */
+export function gradientPng(width: number, height: number, top: number[], bottom: number[]): Uint8Array {
+  const rows: Buffer[] = [];
+  for (let y = 0; y < height; y++) {
+    const t = height > 1 ? y / (height - 1) : 0;
+    const row = Buffer.alloc(1 + width * 3); // filter byte 0, then RGB
+    for (let x = 0; x < width; x++) {
+      for (let c = 0; c < 3; c++) row[1 + x * 3 + c] = Math.round(top[c]! * (1 - t) + bottom[c]! * t);
+    }
+    rows.push(row);
+  }
+  const chunk = (type: string, data: Buffer) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body));
+    return Buffer.concat([len, body, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // colour type: truecolour
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", deflateSync(Buffer.concat(rows))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+function crc32(buf: Buffer): number {
+  let c = ~0;
+  for (const byte of buf) {
+    c ^= byte;
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xedb88320 & -(c & 1));
+  }
+  return ~c >>> 0;
 }
 
 /**

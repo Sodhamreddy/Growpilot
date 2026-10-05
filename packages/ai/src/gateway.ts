@@ -1,8 +1,8 @@
 import { AppError, type Logger, type TenantContext } from "@ob/core";
 import type {
-  AiProvider, EmbedRequest, GenerateRequest, GenerateResponse, ModelBinding, TaskAlias,
+  AiProvider, EmbedRequest, GenerateRequest, GenerateResponse, ImageRequest, ImageResponse, ModelBinding,
 } from "./types.js";
-import { routeFor, computeCostMicros } from "./registry.js";
+import { routeFor, computeCostMicros, IMAGE_BINDING } from "./registry.js";
 
 /**
  * AI Gateway — spec §5.2.
@@ -154,6 +154,70 @@ export class Gateway {
     );
   }
 
+  /**
+   * One image, budget-checked and recorded like every other model call.
+   *
+   * No retry loop: an image costs the same whether or not the attempt is
+   * kept, so a failure goes back to the person who asked, who can try again.
+   */
+  async generateImage(ctx: TenantContext, req: ImageRequest): Promise<ImageResponse> {
+    await this.#assertWithinBudget(ctx.workspaceId, "image_generation");
+    const provider = this.#deps.providers.get(IMAGE_BINDING.provider);
+    if (!provider?.isConfigured() || !provider.generateImage) {
+      throw new AppError(
+        "provider_error",
+        "No image model is set up. Add a Google API key to generate images, or upload one instead.",
+        { retryable: false },
+      );
+    }
+
+    const started = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), IMAGE_BINDING.timeoutMs);
+    const base = {
+      workspaceId: ctx.workspaceId,
+      correlationId: ctx.correlationId,
+      taskAlias: "image_generation",
+      promptVersion: req.promptVersion,
+      inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+      attemptIndex: 0,
+    };
+    try {
+      const res = await provider.generateImage(req, IMAGE_BINDING.model, controller.signal);
+      await this.#record({
+        ...base,
+        provider: res.provider,
+        model: res.model,
+        status: "succeeded",
+        // The offline stand-in costs nothing, and recording a price for it
+        // would count against the budget of a workspace running on it.
+        costMicros: res.provider === "local" ? 0 : IMAGE_BINDING.costMicrosPerImage,
+        latencyMs: Date.now() - started,
+      });
+      this.#deps.logger.info("Image generated", {
+        correlationId: ctx.correlationId, workspaceId: ctx.workspaceId,
+        provider: res.provider, model: res.model, latencyMs: Date.now() - started,
+      });
+      return res;
+    } catch (err) {
+      const appErr = err instanceof AppError
+        ? err
+        : new AppError("provider_error", "The image request failed.", { cause: err });
+      await this.#record({
+        ...base,
+        provider: IMAGE_BINDING.provider,
+        model: IMAGE_BINDING.model,
+        status: "failed",
+        costMicros: 0,
+        latencyMs: Date.now() - started,
+        error: describeFailure(appErr),
+      });
+      throw appErr;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** Embeddings for the knowledge base (spec §4). */
   async embed(ctx: TenantContext, req: EmbedRequest): Promise<{ vectors: number[][]; model: string }> {
     const route = routeFor("embedding");
@@ -193,7 +257,7 @@ export class Gateway {
     throw new AppError("provider_error", "No embedding provider is available.");
   }
 
-  async #assertWithinBudget(workspaceId: string, alias: TaskAlias): Promise<void> {
+  async #assertWithinBudget(workspaceId: string, alias: string): Promise<void> {
     const [spent, budget] = await Promise.all([
       this.#deps.spendThisPeriod(workspaceId),
       this.#deps.budgetFor(workspaceId),

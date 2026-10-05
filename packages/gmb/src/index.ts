@@ -1,79 +1,16 @@
 /**
  * GMB Reviews Automation.
  *
- * The loop this module will own:
- *   read reviews → draft a reply in the brand voice → approval → post the reply
+ * The loop this module owns:
+ *   read reviews → draft a reply in the brand voice → a person approves → post
  *
- * Depends on @ob/pipeline for the voice profile and the approval gate, and on
- * nothing in @ob/blog or @ob/social.
- *
- * Nothing is implemented yet: reading reviews and posting replies both need a
- * Google Business Profile OAuth credential, and there is no honest way to build
- * against fixtures here. Review text is written by real customers, so inventing
- * examples would mean putting words in the mouths of people who never said
- * them — and a reply drafted against invented input tells us nothing about how
- * the real thing will read.
- *
- * The types below are the contract the rest of the module will be built against.
+ * Reading comes from Google Business Profile once Google approves API access
+ * for the Cloud project, and from the Places API (latest five, read-only)
+ * until then. Posting a reply needs Business Profile; before that, replies
+ * are copied and pasted on Google by hand.
  */
-
-export type ReviewRating = 1 | 2 | 3 | 4 | 5;
-
-/** One review, as it comes back from Google. */
-export interface Review {
-  /** Google's own review name/id. The idempotency key for a reply. */
-  externalId: string;
-  locationId: string;
-  rating: ReviewRating;
-  /** Reviewers can leave a star rating and no words. */
-  comment: string | null;
-  authorDisplayName: string;
-  createdAt: Date;
-  updatedAt: Date;
-  /** Present when someone has already replied, ours or otherwise. */
-  existingReply: { comment: string; updatedAt: Date } | null;
-}
-
-/**
- * A drafted reply, awaiting a person.
- *
- * `requiresHumanEdit` is separate from the approval gate on purpose. Some
- * reviews must not be answered by a generated reply at all — an allegation of
- * harm, a legal threat, a safety complaint — and those need a person to write
- * the words, not merely to approve ours.
- */
-export interface ReviewReply {
-  reviewId: string;
-  body: string;
-  /** Which facts the reply leaned on, so a reviewer can check it. */
-  groundedIn: string[];
-  requiresHumanEdit: boolean;
-  /** Set when the reply was withheld, with the reason stated plainly. */
-  withheldReason: string | null;
-}
-
-/**
- * Reviews that must never receive an automated reply.
- *
- * Deliberately broad. The cost of a person handling a review that did not need
- * it is a few minutes; the cost of a generated reply to an allegation of injury
- * or discrimination is a public statement the business did not make and cannot
- * unsay.
- */
-export const REPLY_BLOCKLIST_PATTERNS: RegExp[] = [
-  /\b(lawsuit|sue|suing|attorney|lawyer|legal action|court)\b/i,
-  /\b(injur\w+|hospital|ambulance|unsafe|hazard|poison\w*)\b/i,
-  /\b(discriminat\w+|racist|racism|sexist|harass\w+|assault)\b/i,
-  /\b(fraud|scam|stolen|theft|police|illegal)\b/i,
-  /\b(died|death|fatal)\b/i,
-];
-
-/** Whether a review needs a person to write the reply rather than approve one. */
-export function requiresHumanReply(comment: string | null, rating: ReviewRating): boolean {
-  if (comment && REPLY_BLOCKLIST_PATTERNS.some((re) => re.test(comment))) return true;
-  // A one-star review with an explanation is a complaint worth answering
-  // personally; a generated apology is exactly the wrong register.
-  if (rating === 1 && comment !== null && comment.trim().length > 0) return true;
-  return false;
-}
+export * from "./rules.js";
 export * from "./scrape.js";
+export * from "./google.js";
+export * from "./reply.js";
+export * from "./sync.js";

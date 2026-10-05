@@ -66,6 +66,22 @@ export interface AiProvider {
   isConfigured(): boolean;
   generate(req: GenerateRequest, model: string, signal: AbortSignal): Promise<GenerateResponse>;
   embed?(req: EmbedRequest, model: string, signal: AbortSignal): Promise<EmbedResponse>;
+  generateImage?(req: ImageRequest, model: string, signal: AbortSignal): Promise<ImageResponse>;
+}
+
+/** One image from a text prompt. */
+export interface ImageRequest {
+  prompt: string;
+  /** "4:5", "1:1", "9:16". The model's own set of ratios. */
+  aspectRatio: string;
+  promptVersion: string;
+}
+
+export interface ImageResponse {
+  data: Uint8Array;
+  mimeType: string;
+  provider: string;
+  model: string;
 }
 
 /** One rung of a fallback chain (spec §5.2 "Support fallback providers"). */

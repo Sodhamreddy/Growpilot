@@ -10,7 +10,7 @@ export function NavCurrentMarker() {
 
   useEffect(() => {
     const routes = [
-      "/home", "/articles", "/social", "/reviews", "/business", "/settings",
+      "/home", "/articles", "/social", "/social/calendar", "/social/content", "/reviews", "/business", "/settings",
       "/settings/business", "/voice", "/integrations", "/preferences", "/keywords",
     ];
     const preload = () => routes.forEach((route) => router.prefetch(route));

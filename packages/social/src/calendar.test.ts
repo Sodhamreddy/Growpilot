@@ -255,6 +255,24 @@ describe("the tally a reviewer checks", () => {
   });
 });
 
+describe("replanning around posts that stay", () => {
+  it("counts occupied days towards the target and never fills them again", () => {
+    const plan = planMonth(evergreen(20), { monthKey: "2026-10", target: 10, occupied: [5, 12, 19] });
+    expect(plan.slots).toHaveLength(7);
+    const days = plan.slots.map((s) => Number(s.date.slice(8)));
+    expect(days).not.toEqual(expect.arrayContaining([5]));
+    expect(days.some((d) => [5, 12, 19].includes(d))).toBe(false);
+    expect(plan.warnings.join(" ")).not.toContain("wanted");
+  });
+
+  it("warns when an observance lands on a day that already has a post", () => {
+    const plan = planMonth([topic({ postDate: "2026-10-12", occasion: "Some Day" })], {
+      monthKey: "2026-10", target: 2, occupied: [12],
+    });
+    expect(plan.warnings).toContain("Two posts land on the 12: Some Day.");
+  });
+});
+
 describe("month label", () => {
   it("reads as a heading", () => {
     expect(monthLabel("2026-10")).toBe("October 2026");

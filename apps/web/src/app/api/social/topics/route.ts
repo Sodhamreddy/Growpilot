@@ -205,6 +205,16 @@ export const PATCH = route(async (ctx, req) => {
     if (!body.format) {
       throw new AppError("validation_failed", "Nothing to change.", { retryable: false });
     }
+    // The format decides what the copy is, so it moves with the copy's review.
+    if (topic.status === "approved" || topic.status === "published") {
+      throw new AppError(
+        "conflict",
+        topic.status === "approved"
+          ? "This post is approved. Take the approval back before changing its format."
+          : "This post is published and its format can no longer change.",
+        { retryable: false },
+      );
+    }
     await database
       .update(socialTopics)
       .set({ format: body.format, updatedAt: new Date() })

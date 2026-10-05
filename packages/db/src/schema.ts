@@ -300,6 +300,15 @@ export const businesses = pgTable("businesses", {
    */
   metaPageId: text("meta_page_id"),
   metaPageName: text("meta_page_name"),
+  /**
+   * Which Google listing is this client's, for reviews.
+   *
+   * Chosen, never guessed, for the same reason as the Facebook Page above: a
+   * name search finds namesakes, and replying to another business's reviews
+   * is a mistake nothing downstream could catch. Also carries the listing's
+   * latest rating and review count, from whichever source synced last.
+   */
+  googleListing: jsonb("google_listing").$type<GoogleListing>(),
   /** Set when the customer confirms the extracted profile — spec §3.1 gate. */
   confirmedAt: timestamp("confirmed_at", { withTimezone: true }),
   confirmedBy: uuid("confirmed_by").references(() => users.id, { onDelete: "set null" }),
@@ -784,6 +793,61 @@ export interface SocialContentPack {
   altText: string;
   /** Carousel slides, reel script, or Q&A pairs. Empty for a single image. */
   formatExtra: string;
+  /**
+   * The words printed on the post image: headline, then subline.
+   *
+   * Optional because packs written before it existed only carry it inside the
+   * image brief; readers fall back to parsing it from there.
+   */
+  imageText?: string;
+  /** The post's picture, once one is generated or uploaded (step 4). */
+  image?: PackImage;
+  /** When and where it publishes, and what happened (step 5). */
+  schedule?: PackSchedule;
+}
+
+export type SocialNetworkId = "facebook" | "instagram";
+
+/**
+ * A post's publishing: the time, the networks, and each network's outcome.
+ *
+ * Per network, because Facebook and Instagram succeed and fail separately,
+ * and a retry must publish only where it has not already: posting the same
+ * photo to a Page twice is the one failure worse than not posting.
+ */
+export interface PackSchedule {
+  /** ISO time it publishes. */
+  at: string;
+  networks: SocialNetworkId[];
+  status: "scheduled" | "publishing" | "published" | "partial" | "failed";
+  results: Partial<Record<SocialNetworkId, {
+    status: "published" | "failed";
+    /** The network's own id for the post. */
+    id?: string;
+    url?: string;
+    error?: string;
+    at: string;
+  }>>;
+}
+
+/**
+ * A post's picture and its review.
+ *
+ * Kept on the pack because it belongs to the copy it was made from: the
+ * image text is printed on it. Rewriting the copy keeps the picture but sends
+ * it back to draft, since its words may no longer match.
+ */
+export interface PackImage {
+  /** Storage key, "<workspaceId>/<topicId>-<time>.<ext>". */
+  key: string;
+  mimeType: string;
+  source: "generated" | "uploaded";
+  status: "draft" | "approved";
+  /** ISO time it was made. */
+  createdAt: string;
+  /** What the model was asked, so a regeneration can be compared with it. */
+  prompt?: string;
+  model?: string;
 }
 
 /**
@@ -911,3 +975,87 @@ export const socialTopicsRelations = relations(socialTopics, ({ one }) => ({
   category: one(socialCategories, { fields: [socialTopics.categoryId], references: [socialCategories.id] }),
   month: one(socialMonths, { fields: [socialTopics.monthId], references: [socialMonths.id] }),
 }));
+
+// ─── GMB reviews ────────────────────────────────────────────────────────────
+
+/** Where a review was read from. */
+export type ReviewSource = "gbp" | "places";
+
+export interface GoogleListing {
+  /** Google Places id: the public listing, readable with an API key. */
+  placeId?: string;
+  title?: string;
+  address?: string;
+  /** The listing on Google Maps, where replies can always be written by hand. */
+  mapsUri?: string;
+  /** "accounts/1/locations/2": the owner's listing in Business Profile, which replies post to. */
+  gbpLocation?: string;
+  gbpTitle?: string;
+  rating?: number | null;
+  reviewCount?: number | null;
+  /** Which source the totals and reviews came from last. */
+  source?: ReviewSource;
+  syncedAt?: string;
+  /** Why the last sync failed, in words a person can act on. */
+  lastError?: string | null;
+  /**
+   * Business Profile, separately: "pending" while Google has not approved API
+   * access, which is expected for weeks and not a failure of the sync.
+   */
+  gbpStatus?: "ok" | "pending" | "error";
+  gbpError?: string | null;
+}
+
+/** The reply being prepared for one review. */
+export interface ReviewReplyDraft {
+  body: string;
+  status: "draft" | "approved" | "posted" | "posted_by_hand";
+  /**
+   * The review is one a person must answer (a legal threat, an injury, a
+   * one-star complaint). No reply is generated for it; the box starts empty.
+   */
+  requiresHumanEdit: boolean;
+  withheldReason: string | null;
+  /** Edited by a person since it was generated. */
+  edited: boolean;
+  model?: string;
+  createdAt: string;
+  updatedAt: string;
+  postedAt?: string;
+  error?: string | null;
+}
+
+/**
+ * One Google review of a client, and the reply prepared for it.
+ *
+ * Keyed by Google's own id per source. Reviews read through the Places API
+ * (at most five, and cached no longer than Google's terms allow) and through
+ * Business Profile (all of them, repliable) have different ids, so the page
+ * shows Business Profile's once it has any.
+ */
+export const gmbReviews = pgTable("gmb_reviews", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  businessId: uuid("business_id").notNull().references(() => businesses.id, { onDelete: "cascade" }),
+  source: text("source").$type<ReviewSource>().notNull(),
+  externalId: text("external_id").notNull(),
+  authorName: text("author_name").notNull().default(""),
+  authorPhotoUrl: text("author_photo_url"),
+  authorUrl: text("author_url"),
+  rating: integer("rating").notNull(),
+  /** Reviewers can leave stars and no words. */
+  comment: text("comment"),
+  languageCode: text("language_code"),
+  reviewUrl: text("review_url"),
+  publishedAt: timestamp("published_at", { withTimezone: true }).notNull(),
+  editedAt: timestamp("edited_at", { withTimezone: true }),
+  /** The reply already on Google, ours or anyone's. */
+  googleReply: jsonb("google_reply").$type<{ comment: string; updatedAt: string } | null>(),
+  draft: jsonb("draft").$type<ReviewReplyDraft | null>(),
+  syncedAt: timestamp("synced_at", { withTimezone: true }).notNull().defaultNow(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("gmb_review_ext_uq").on(t.businessId, t.source, t.externalId),
+  index("gmb_review_biz_idx").on(t.workspaceId, t.businessId, t.publishedAt),
+]);

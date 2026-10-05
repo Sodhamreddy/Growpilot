@@ -21,6 +21,9 @@ services/crawler/__pycache__/
 # Production build output, kept apart from the dev server's .next
 apps/web/.next-build/
 
+# Post images stored on local disk (apps/web/src/lib/image-store.ts)
+.image-store/
+
 # Local dev noise, not source.
 #
 # .devlogs holds captured stdout from `npm run dev`; .next-stale is a build

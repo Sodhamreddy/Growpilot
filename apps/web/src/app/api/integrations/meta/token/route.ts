@@ -5,7 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { AppError, requireRole, seal, config } from "@ob/core";
 import { integrations, repo } from "@ob/db";
 import { JOBS, payloadFrom } from "@ob/jobs";
-import { exchangeForLongLivedToken, listPages, GraphError } from "@ob/social";
+import { exchangeForLongLivedToken, listPages, grantedPermissions, GraphError } from "@ob/social";
 import { route, parseBody } from "@/lib/api";
 import { db, getQueues } from "@/lib/services";
 
@@ -80,6 +80,9 @@ export const POST = route(async (ctx, req) => {
     );
   }
 
+  // What the token was actually granted, so the schedule page knows whether it can post.
+  const scopes = await grantedPermissions(longLivedToken).catch(() => [] as string[]);
+
   const sealed = seal(JSON.stringify({
     userToken: longLivedToken,
     pages: pages.map((p) => ({
@@ -114,6 +117,7 @@ export const POST = route(async (ctx, req) => {
       externalAccountId: entry.externalId,
       displayName: entry.displayName,
       credentialSealed: sealed,
+      scopes,
       // Page tokens derived from a long-lived user token do not expire, so
       // recording the user token's own expiry would disconnect a working
       // integration on a date that means nothing to it.

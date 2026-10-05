@@ -7,6 +7,7 @@ import { integrations, metricSnapshots } from "@ob/db";
 import { TopBar } from "@/components/TopBar";
 import { MetaTokenConnect } from "@/components/MetaTokenConnect";
 import { MetaPagePicker } from "@/components/MetaPagePicker";
+import { metaLoginBlocked } from "@/lib/meta-login";
 import { SocialInsightsChart, type SocialChartPoint } from "@/components/SocialInsightsChart";
 import { SocialDateFilter } from "@/components/SocialDateFilter";
 
@@ -91,6 +92,7 @@ export default async function SocialInsightsPage({ searchParams }: { searchParam
   const current = scoped.filter((row) => row.date >= rangeStart && row.date <= rangeEnd);
   const previous = scoped.filter((row) => row.date >= previousStart && row.date < rangeStart);
   const connected = new Map(connectionRows.map((row) => [row.provider, row]));
+  const loginBlocked = metaLoginBlocked();
   const initials = (session?.name ?? session?.email ?? "?").split(/[\s@.]+/).filter(Boolean)
     .slice(0, 2).map((part) => part[0]!.toUpperCase()).join("") || "?";
   const cards = [["reach", "Reach"], ["engagement", "Engagement"], ["likes", "Likes"],
@@ -155,7 +157,9 @@ export default async function SocialInsightsPage({ searchParams }: { searchParam
       <section className="si-hero"><div><span className="social-eyebrow">Cross-channel analytics</span><h1>Social Media Insights</h1>
         <p>Track reach, engagement, audience growth, and post performance from every connected channel.</p></div>
         <div style={{ display: "grid", gap: 10, justifyItems: "end" }}>
-          <a className="btn primary" href="/api/integrations/meta/start">Connect Facebook &amp; Instagram</a>
+          {loginBlocked
+            ? <p className="metalogin-note">{loginBlocked}</p>
+            : <a className="btn primary" href="/api/integrations/meta/start">Connect Facebook &amp; Instagram</a>}
           {/*
             * The fallback, under the button it falls back from.
             *
@@ -166,6 +170,8 @@ export default async function SocialInsightsPage({ searchParams }: { searchParam
           <MetaTokenConnect
             connected={connected.get("facebook")?.status === "connected"}
             pageNames={connected.get("facebook")?.displayName ?? null}
+            defaultOpen={!!loginBlocked}
+            offerToken={!!loginBlocked}
           />
           {/*
             * Which of the connection's pages is this client's.
@@ -216,7 +222,7 @@ export default async function SocialInsightsPage({ searchParams }: { searchParam
           : <div className="si-inline-empty">Aggregate insights are available, but no post-level records have been synced yet.</div>}</section>
       </> : <section className="si-empty"><span className="si-empty-icon">↗</span><div><span className="social-eyebrow">Insights setup</span><h2>Connect a social channel to see real performance</h2>
         <p>Once Facebook, Instagram, LinkedIn, or X is connected, this page will show account growth and every synced post’s reach and engagement.</p></div>
-        <a className="btn primary" href="/api/integrations/meta/start">Connect Facebook &amp; Instagram</a></section>}
+        {loginBlocked ? null : <a className="btn primary" href="/api/integrations/meta/start">Connect Facebook &amp; Instagram</a>}</section>}
     </div>
   </>;
 }

@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./text": {
+      "types": "./dist/text.d.ts",
+      "default": "./dist/text.js"
     }
   },
   "scripts": {
@@ -20,6 +24,7 @@
     "@ob/db": "workspace:*",
     "@ob/ai": "workspace:*",
     "@ob/voice": "workspace:*",
-    "@ob/pipeline": "workspace:*"
+    "@ob/pipeline": "workspace:*",
+    "sharp": "^0.35.4"
   }
 }

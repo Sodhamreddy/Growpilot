@@ -233,6 +233,21 @@ export function routeFor(alias: TaskAlias): RoutePolicy {
   return route;
 }
 
+/**
+ * The image model.
+ *
+ * One binding rather than a chain: only Google's model is wired, and a
+ * fallback to a different image model would change what posts look like
+ * from one day to the next. Priced per image, not per token, because that is
+ * how Google bills it (list price for gemini-2.5-flash-image, 1024px).
+ */
+export const IMAGE_BINDING = {
+  provider: "google",
+  model: "gemini-2.5-flash-image",
+  costMicrosPerImage: 39_000,
+  timeoutMs: 90_000,
+} as const;
+
 /** Micro-dollar cost of one call. Recorded on every AI job (spec §14.1). */
 export function computeCostMicros(
   binding: { inputCostPerMTok: number; outputCostPerMTok: number },

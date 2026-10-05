@@ -24,6 +24,9 @@ export const PROMPT_VERSIONS = {
   brandGate: "gate-brand@2026-09-11",
   riskGate: "gate-risk@2026-09-11",
   keywordIntent: "kw-intent@2026-09-11",
+  socialPack: "social-pack@2026-09-25",
+  socialImage: "social-image@2026-09-29",
+  reviewReply: "review-reply@2026-09-30",
 } as const;
 
 export type PromptVersion = (typeof PROMPT_VERSIONS)[keyof typeof PROMPT_VERSIONS];

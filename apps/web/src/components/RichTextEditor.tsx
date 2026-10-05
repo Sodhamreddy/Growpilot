@@ -30,7 +30,7 @@ import { useEffect } from "react";
  * losing formatting on save would be bad; throwing inside `onUpdate`, which
  * fires on every keystroke, would be worse.
  */
-function readMarkdown(editor: Editor): string {
+export function readMarkdown(editor: Editor): string {
   const storage = (editor.storage as unknown as Record<string, unknown>)["markdown"] as
     | { getMarkdown?: () => string }
     | undefined;

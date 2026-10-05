@@ -8,6 +8,6 @@
     { "path": "../../packages/ai" }, { "path": "../../packages/seo" },
     { "path": "../../packages/voice" }, { "path": "../../packages/kb" },
     { "path": "../../packages/jobs" }, { "path": "../../packages/pipeline" }, { "path": "../../packages/blog" },
-    { "path": "../../packages/publish" }
+    { "path": "../../packages/publish" }, { "path": "../../packages/gmb" }
   ]
 }

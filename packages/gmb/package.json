@@ -20,6 +20,7 @@
     "@ob/db": "workspace:*",
     "@ob/ai": "workspace:*",
     "@ob/voice": "workspace:*",
-    "@ob/pipeline": "workspace:*"
+    "@ob/pipeline": "workspace:*",
+    "drizzle-orm": "^0.38.3"
   }
 }

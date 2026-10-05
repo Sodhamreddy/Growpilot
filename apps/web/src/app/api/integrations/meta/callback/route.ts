@@ -4,8 +4,8 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
 import { config, seal } from "@ob/core";
-import { integrations, repo } from "@ob/db";
-import { exchangeForLongLivedToken, listPages, GraphError } from "@ob/social";
+import { businesses, integrations, repo } from "@ob/db";
+import { exchangeForLongLivedToken, listPages, grantedPermissions, GraphError } from "@ob/social";
 import { requireTenant } from "@/lib/auth";
 import { db } from "@/lib/services";
 
@@ -27,9 +27,12 @@ import { db } from "@/lib/services";
  */
 
 const STATE_COOKIE = "ob_meta_state";
+const RETURN_COOKIE = "ob_meta_return";
+/** Where a connect may return to. The cookie is ours, but it is still checked. */
+const RETURN_TO = new Set(["/social-insights", "/social/schedule"]);
 
-function back(reason: string | null): NextResponse {
-  const url = new URL(`${config().APP_URL}/social-insights`);
+function backTo(path: string, reason: string | null): NextResponse {
+  const url = new URL(`${config().APP_URL}${RETURN_TO.has(path) ? path : "/social-insights"}`);
   if (reason) url.searchParams.set("meta_error", reason);
   else url.searchParams.set("meta", "connected");
   return NextResponse.redirect(url.toString());
@@ -43,6 +46,9 @@ export async function GET(req: Request): Promise<NextResponse> {
   const jar = await cookies();
   const expected = jar.get(STATE_COOKIE)?.value;
   jar.delete(STATE_COOKIE);
+  const returnTo = jar.get(RETURN_COOKIE)?.value ?? "/social-insights";
+  jar.delete(RETURN_COOKIE);
+  const back = (reason: string | null) => backTo(returnTo, reason);
 
   // Meta sends `error=access_denied` when somebody closes the consent screen.
   // Not a failure worth an alarming message — they simply changed their mind.
@@ -89,6 +95,10 @@ export async function GET(req: Request): Promise<NextResponse> {
     const pages = await listPages(longLived.accessToken);
     if (pages.length === 0) return back("no_pages");
 
+    // What was granted, not what was asked for: a person can untick posting on
+    // the consent screen, and the schedule page needs to know before it tries.
+    const scopes = await grantedPermissions(longLived.accessToken).catch(() => [] as string[]);
+
     /*
      * One row per network, sharing the same page token.
      *
@@ -131,6 +141,7 @@ export async function GET(req: Request): Promise<NextResponse> {
         externalAccountId: entry.externalId,
         displayName: entry.displayName,
         credentialSealed: sealed,
+        scopes,
         // Page tokens from a long-lived user token do not expire. Recording
         // the user token's expiry would disconnect a working integration on a
         // date that means nothing.
@@ -147,6 +158,22 @@ export async function GET(req: Request): Promise<NextResponse> {
           workspaceId: ctx.workspaceId, provider: entry.provider, ...values,
         });
       }
+    }
+
+    /*
+     * One Page is this client's Page.
+     *
+     * Choosing from a list of one is a step that only exists to be clicked,
+     * and "log in and it is connected" is the whole point of the button. With
+     * several Pages (an agency's login) the person still picks, on the page
+     * they return to, because guessing would post to someone else's audience.
+     */
+    const business = await repo.getPrimaryBusiness(database, ctx);
+    if (business && !business.metaPageId && pages.length === 1) {
+      await database
+        .update(businesses)
+        .set({ metaPageId: pages[0]!.id, metaPageName: pages[0]!.name, updatedAt: new Date() })
+        .where(and(eq(businesses.workspaceId, ctx.workspaceId), eq(businesses.id, business.id)));
     }
 
     await repo.writeAudit(database, ctx, {

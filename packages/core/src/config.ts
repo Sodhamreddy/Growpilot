@@ -18,6 +18,12 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   GOOGLE_API_KEY: z.string().optional(),
+  /**
+   * For reading a listing's public rating and latest reviews (Places API).
+   * Falls back to GOOGLE_API_KEY, which works when Places API (New) is turned
+   * on for that key's Google Cloud project.
+   */
+  GOOGLE_MAPS_API_KEY: z.string().optional(),
   AI_MOCK: z.coerce.number().int().min(0).max(1).default(0),
 
   CRAWL_MAX_PAGES: z.coerce.number().int().positive().max(500).default(40),
@@ -47,6 +53,9 @@ const schema = z.object({
   META_APP_SECRET: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
+  /** OAuth client for the Business Profile connection; falls back to the sign-in client. */
+  GOOGLE_GBP_CLIENT_ID: z.string().optional(),
+  GOOGLE_GBP_CLIENT_SECRET: z.string().optional(),
   GOOGLE_ADS_CLIENT_ID: z.string().optional(),
   GOOGLE_ADS_CLIENT_SECRET: z.string().optional(),
 });

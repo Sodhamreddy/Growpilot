@@ -65,6 +65,8 @@ export function PlanMonthBanner({
 }) {
   const router = useRouter();
   const [plan, setPlan] = useState<Plan | null>(null);
+  /** Written posts a replan keeps in place, from the last preview. */
+  const [kept, setKept] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** Whether the unschedule confirmation is showing. */
@@ -86,6 +88,7 @@ export function PlanMonthBanner({
       }
       if (mode === "preview") {
         setPlan((body as { plan: Plan }).plan);
+        setKept((body as { kept?: number }).kept ?? 0);
       } else {
         setPlan(null);
         router.refresh();
@@ -217,6 +220,11 @@ export function PlanMonthBanner({
             <span className="small muted">
               {plan.tally.anchored} on a fixed date · {plan.tally.filled} spread across the month
             </span>
+            {kept > 0 ? (
+              <span className="small muted">
+                · {kept} written post{kept === 1 ? "" : "s"} stay where {kept === 1 ? "it is" : "they are"}
+              </span>
+            ) : null}
           </div>
 
           {/*
