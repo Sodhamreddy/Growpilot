@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
  * a container or CI supplies — always wins over the file.
  */
 const here = dirname(fileURLToPath(import.meta.url));
+const monorepoRoot = join(here, "..", "..");
 loadEnv({ path: join(here, "..", "..", ".env"), override: false });
 
 /** @type {import('next').NextConfig} */
@@ -41,7 +42,24 @@ const nextConfig = {
    * packages that use them and are not resolvable from here, so externalising
    * them fails at runtime rather than helping.
    */
-  serverExternalPackages: ["drizzle-orm", "ioredis"],
+  serverExternalPackages: ["drizzle-orm"],
+  // Not ioredis: BullMQ imports its internals ("ioredis/built/utils"), which
+  // Node cannot resolve from BullMQ's own folder under pnpm, so Next bundles it
+  // anyway and warns on every compile. Bundling it is what happens either way.
+
+  /*
+   * Development compiles with Turbopack (`next dev --turbopack`): about twice
+   * as fast per page as webpack here, which matters in a OneDrive folder where
+   * every compiled file is also synced. The webpack hook below still applies
+   * to `next build`.
+   *
+   * The root is the monorepo, stated rather than inferred. Left to guess, Next
+   * finds a stray package-lock.json in the user's home folder and treats the
+   * whole home folder as the project, which is both wrong and slow. Naming it
+   * here is also what tells Next a Turbopack config exists alongside webpack.
+   */
+  turbopack: { root: monorepoRoot },
+  outputFileTracingRoot: monorepoRoot,
 
   webpack(config) {
     // BullMQ ships an optional Valkey client we do not install. Mark it

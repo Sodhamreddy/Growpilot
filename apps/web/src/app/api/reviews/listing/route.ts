@@ -5,7 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { AppError, config, requireRole, type TenantContext } from "@ob/core";
 import { businesses, businessLocations, gmbReviews, repo, type GoogleListing } from "@ob/db";
 import {
-  GoogleApiError, gbpAccessToken, googleCredentials, listGbpLocations, placeReviews, searchPlaces, syncReviews,
+  GoogleApiError, gbpAccessToken, googleCredentials, isMapsLink, listGbpLocations, placeReviews, searchPlaces, syncReviews,
 } from "@ob/gmb";
 import { route, parseBody } from "@/lib/api";
 import { db } from "@/lib/services";
@@ -62,6 +62,7 @@ export const GET = route(async (ctx, req) => {
 });
 
 const chooseSchema = z.union([
+  z.object({ mapsLink: z.string().trim().url().max(2000) }),
   z.object({ placeId: z.string().min(3).max(300) }),
   z.object({ gbpLocation: z.string().regex(/^accounts\/[^/]+\/locations\/[^/]+$/) }),
 ]);
@@ -75,7 +76,15 @@ export const PATCH = route(async (ctx, req) => {
   const business = await currentBusiness(ctx);
   let listing: GoogleListing = { ...(business.googleListing ?? {}) };
 
-  if ("gbpLocation" in body) {
+  if ("mapsLink" in body) {
+    if (!isMapsLink(body.mapsLink)) {
+      throw new AppError("validation_failed", "That is not a Google Maps link. Open the business on Google Maps, press Share, and copy the link.", { retryable: false });
+    }
+    if (listing.mapsLink && listing.mapsLink !== body.mapsLink) {
+      await database.delete(gmbReviews).where(and(eq(gmbReviews.businessId, business.id), eq(gmbReviews.source, "maps")));
+    }
+    listing = { ...listing, mapsLink: body.mapsLink, mapsReadAt: undefined };
+  } else if ("gbpLocation" in body) {
     // Confirm the account really manages it, rather than trusting an id from the browser.
     const token = await gbpAccessToken(database, ctx, creds).catch(asAppError);
     if (!token) throw new AppError("conflict", "Connect Google first.", { retryable: false });
@@ -100,10 +109,10 @@ export const PATCH = route(async (ctx, req) => {
     .where(and(eq(businesses.workspaceId, ctx.workspaceId), eq(businesses.id, business.id)));
   await repo.writeAudit(database, ctx, {
     action: "reviews.listing_selected", entityType: "business", entityId: business.id,
-    after: { placeId: listing.placeId, gbpLocation: listing.gbpLocation },
+    after: { placeId: listing.placeId, gbpLocation: listing.gbpLocation, mapsLink: listing.mapsLink },
   });
 
-  const result = await syncReviews(database, ctx, { id: business.id, googleListing: listing }, creds).catch(asAppError);
+  const result = await syncReviews(database, ctx, { id: business.id, googleListing: listing }, creds, { force: true }).catch(asAppError);
   const drafting = await queueReplyDrafts(ctx, business.id);
   return { ok: true, listing: result.listing, added: result.added.length, drafting };
 });

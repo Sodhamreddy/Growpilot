@@ -136,3 +136,38 @@ describe("which reviews a person must answer", () => {
     expect(normaliseReply("x".repeat(5000))).toHaveLength(4096);
   });
 });
+
+describe("reading a Google Maps link through the crawler", () => {
+  it("accepts Google Maps links only, so the crawler cannot be pointed elsewhere", async () => {
+    const { isMapsLink } = await import("./google.js");
+    expect(isMapsLink("https://maps.app.goo.gl/AbC123")).toBe(true);
+    expect(isMapsLink("https://www.google.com/maps/place/Northside+Dental/@1,2,17z")).toBe(true);
+    expect(isMapsLink("https://www.google.co.in/maps/place/X")).toBe(true);
+    expect(isMapsLink("https://goo.gl/maps/xyz")).toBe(true);
+    expect(isMapsLink("https://www.google.com/search?q=x")).toBe(false);
+    expect(isMapsLink("https://evil.example/maps/place")).toBe(false);
+    expect(isMapsLink("http://127.0.0.1:8787/maps")).toBe(false);
+  });
+
+  it("turns what the crawler read into reviews, owner replies included", async () => {
+    const { mapsReviews } = await import("./google.js");
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe("http://crawler/maps/reviews");
+      expect(JSON.parse(String(init?.body))).toMatchObject({ url: "https://maps.app.goo.gl/x" });
+      return json({ title: "Kleza", rating: 4.8, count: 31, url: "https://www.google.com/maps/place/Kleza", reviews: [
+        { id: "abc", author: "Priya", authorUrl: null, photo: null, rating: 5, text: "Great", reply: "Thank you!", publishedAt: "2026-10-01T00:00:00Z" },
+      ] });
+    });
+    const res = await mapsReviews("http://crawler/", "https://maps.app.goo.gl/x", { fetcher: fetcher as never });
+    expect(res.place).toMatchObject({ title: "Kleza", rating: 4.8, reviewCount: 31 });
+    expect(res.reviews[0]).toMatchObject({ externalId: "maps:abc", rating: 5, comment: "Great", googleReply: { comment: "Thank you!" } });
+  });
+
+  it("says plainly when Google blocks the read or the crawler is down", async () => {
+    const { mapsReviews } = await import("./google.js");
+    const blocked = vi.fn(async () => json({ blocked: true, error: "Google is showing a traffic check." }, 429));
+    await expect(mapsReviews("http://c", "https://maps.app.goo.gl/x", { fetcher: blocked as never })).rejects.toMatchObject({ kind: "rate" });
+    const down = vi.fn(async () => { throw new TypeError("fetch failed"); });
+    await expect(mapsReviews("http://c", "https://maps.app.goo.gl/x", { fetcher: down as never })).rejects.toThrow(/crawler is not running/);
+  });
+});

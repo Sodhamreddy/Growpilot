@@ -33,6 +33,8 @@ from pydantic import BaseModel, Field
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 
+import maps
+
 # ── Configuration ───────────────────────────────────────────────────────────
 
 PORT = int(os.environ.get("CRAWLER_SERVICE_PORT", "8787"))
@@ -70,6 +72,7 @@ async def lifespan(_: FastAPI):
     finally:
         await _crawler.close()
         _crawler = None
+        await maps.close_browser()
 
 
 app = FastAPI(title="GrowPilot crawler", version="0.1.0", lifespan=lifespan)
@@ -213,6 +216,28 @@ async def render(req: RenderRequest) -> JSONResponse:
             title=(result.metadata or {}).get("title"),
         ).model_dump()
     )
+
+
+class MapsReviewsRequest(BaseModel):
+    url: str
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+@app.post("/maps/reviews")
+async def maps_reviews(req: MapsReviewsRequest) -> JSONResponse:
+    """A business's newest reviews from its public Google Maps page."""
+    if not maps.is_maps_url(req.url):
+        return JSONResponse({"error": "That is not a Google Maps link."}, status_code=422)
+    async with _slots:
+        try:
+            data = await maps.read_reviews(req.url, limit=req.limit)
+        except Exception as exc:  # noqa: BLE001 — a driver failure is the caller's 502
+            return JSONResponse({"error": f"Google Maps could not be read: {exc}"}, status_code=502)
+    if data.get("blocked"):
+        return JSONResponse(data, status_code=429)
+    if data.get("error"):
+        return JSONResponse(data, status_code=422)
+    return JSONResponse(data)
 
 
 if __name__ == "__main__":

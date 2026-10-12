@@ -1,6 +1,6 @@
 import { and, desc, eq, gte, isNotNull, isNull } from "drizzle-orm";
 import { AppError } from "@ob/core";
-import { businesses, gmbReviews } from "@ob/db";
+import { businesses, gmbReviews, type ReviewSource } from "@ob/db";
 import { JOBS } from "@ob/jobs";
 import { GoogleApiError, draftReplyFor, googleCredentials, syncReviews } from "@ob/gmb";
 import type { WorkerContext } from "../../context.js";
@@ -44,7 +44,7 @@ export async function processReviewsSync(wc: WorkerContext, payload: ReviewsSync
     .limit(1);
   if (!business?.googleListing) return { status: "no_listing" };
 
-  let result: { source: "gbp" | "places" | null; added: string[] };
+  let result: { source: ReviewSource | null; added: string[] };
   try {
     result = payload.draftOnly
       ? { source: business.googleListing.source ?? null, added: [] }

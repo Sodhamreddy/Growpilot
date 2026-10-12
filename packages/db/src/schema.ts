@@ -979,7 +979,12 @@ export const socialTopicsRelations = relations(socialTopics, ({ one }) => ({
 // ─── GMB reviews ────────────────────────────────────────────────────────────
 
 /** Where a review was read from. */
-export type ReviewSource = "gbp" | "places";
+/**
+ * Where a review was read from, best first: Business Profile (all reviews,
+ * replies post from here), Places API (latest five), the listing's public Maps
+ * page (read by a browser, used only when neither API is available).
+ */
+export type ReviewSource = "gbp" | "places" | "maps";
 
 export interface GoogleListing {
   /** Google Places id: the public listing, readable with an API key. */
@@ -988,6 +993,10 @@ export interface GoogleListing {
   address?: string;
   /** The listing on Google Maps, where replies can always be written by hand. */
   mapsUri?: string;
+  /** The Google Maps link the customer gave, read by the browser crawler when no API is available. */
+  mapsLink?: string;
+  /** When the Maps page was last read, so it is read at most about once a day. */
+  mapsReadAt?: string;
   /** "accounts/1/locations/2": the owner's listing in Business Profile, which replies post to. */
   gbpLocation?: string;
   gbpTitle?: string;

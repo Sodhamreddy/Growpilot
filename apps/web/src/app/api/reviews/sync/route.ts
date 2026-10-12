@@ -23,7 +23,7 @@ export const POST = route(
 
     let result;
     try {
-      result = await syncReviews(database, ctx, { id: business.id, googleListing: business.googleListing }, googleCredentials(config()));
+      result = await syncReviews(database, ctx, { id: business.id, googleListing: business.googleListing }, googleCredentials(config()), { force: true });
     } catch (err) {
       if (err instanceof GoogleApiError) throw new AppError("provider_error", err.message, { retryable: !err.permanent });
       throw err;

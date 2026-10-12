@@ -69,7 +69,7 @@ function Ago({ iso }: { iso: string }) {
 }
 
 export function ReviewsWorkspace({
-  businessName, listing, reviews: initial, source, google, placesConfigured, hasVoice, keywords, canEdit, canConnect,
+  businessName, listing, reviews: initial, source, google, placesConfigured, crawlerConfigured, hasVoice, keywords, canEdit, canConnect,
 }: {
   businessName: string;
   listing: GoogleListing | null;
@@ -77,6 +77,7 @@ export function ReviewsWorkspace({
   source: ReviewSource | null;
   google: GoogleState;
   placesConfigured: boolean;
+  crawlerConfigured: boolean;
   hasVoice: boolean;
   keywords: { word: string; count: number }[];
   canEdit: boolean;
@@ -88,7 +89,7 @@ export function ReviewsWorkspace({
   const [filter, setFilter] = useState<Filter>("open");
   const [syncing, setSyncing] = useState(false);
   const [syncNote, setSyncNote] = useState<string | null>(null);
-  const [picking, setPicking] = useState(!listing?.placeId && !listing?.gbpLocation);
+  const [picking, setPicking] = useState(!listing?.placeId && !listing?.gbpLocation && !listing?.mapsLink);
   /** Refreshes left while the worker drafts replies. */
   const [polls, setPolls] = useState(0);
 
@@ -135,7 +136,7 @@ export function ReviewsWorkspace({
   };
 
   const steps = [
-    { label: "Listing chosen", ready: Boolean(listing?.placeId || listing?.gbpLocation) },
+    { label: "Listing chosen", ready: Boolean(listing?.placeId || listing?.gbpLocation || listing?.mapsLink) },
     { label: "Reading reviews", ready: Boolean(source) },
     { label: "Replies in brand voice", ready: hasVoice },
     { label: "Posting replies from here", ready: gbpReady },
@@ -174,6 +175,7 @@ export function ReviewsWorkspace({
             listing={listing}
             googleConnected={google.connected}
             placesConfigured={placesConfigured}
+            crawlerConfigured={crawlerConfigured}
             canEdit={canEdit}
             open={picking}
             onOpen={setPicking}
@@ -184,10 +186,10 @@ export function ReviewsWorkspace({
             <div className="reviews-section-title rv-titlebar">
               <h2>Reviews</h2>
               <span>
-                {source === "gbp" ? "From Google Business Profile" : source === "places" ? "Latest 5, from Google Maps (Places API)" : "Not reading yet"}
+                {source === "gbp" ? "From Google Business Profile" : source === "places" ? "Latest 5, from Google Maps (Places API)" : source === "maps" ? "Newest, read from the Google Maps page" : "Not reading yet"}
                 {listing?.syncedAt ? <> · synced <Ago iso={listing.syncedAt} /></> : null}
               </span>
-              {canEdit && (listing?.placeId || listing?.gbpLocation) ? (
+              {canEdit && (listing?.placeId || listing?.gbpLocation || listing?.mapsLink) ? (
                 <button type="button" className="btn small" disabled={syncing} onClick={() => void sync()}>
                   {syncing ? "Syncing…" : "Sync now"}
                 </button>
@@ -195,6 +197,12 @@ export function ReviewsWorkspace({
             </div>
             {syncNote ? <p className="rv-note" role="status">{syncNote}{polls > 0 ? " Checking for drafts…" : ""}</p> : null}
             {listing?.lastError && !source ? <p className="rv-error">{listing.lastError}</p> : null}
+            {source === "maps" ? (
+              <p className="rv-hint">
+                Read from the listing&apos;s public Google Maps page about once a day, so dates are approximate. Replies are copied here and
+                pasted on Google. Connecting Google later reads every review and posts replies from here.
+              </p>
+            ) : null}
             {source === "places" ? (
               <p className="rv-hint">
                 Until Google approves Business Profile API access, Google only shares a listing&apos;s latest 5 reviews, and cannot say
@@ -222,8 +230,8 @@ export function ReviewsWorkspace({
             ) : (
               <div className="reviews-empty">
                 <span className="reviews-empty-icon"><IconInbox size={24} /></span>
-                <strong>{listing?.placeId || listing?.gbpLocation ? "No reviews read yet" : "Choose the Google listing first"}</strong>
-                <p>{listing?.placeId || listing?.gbpLocation
+                <strong>{listing?.placeId || listing?.gbpLocation || listing?.mapsLink ? "No reviews read yet" : "Choose the Google listing first"}</strong>
+                <p>{listing?.placeId || listing?.gbpLocation || listing?.mapsLink
                   ? "Press Sync now to read them. New reviews get a reply drafted automatically."
                   : `Find ${businessName} on Google above. Its reviews appear here with a reply drafted for each.`}</p>
               </div>
@@ -312,12 +320,13 @@ function GoogleCard({ google, listing, canConnect }: { google: GoogleState; list
 }
 
 function ListingPanel({
-  businessName, listing, googleConnected, placesConfigured, canEdit, open, onOpen, onChosen,
+  businessName, listing, googleConnected, placesConfigured, crawlerConfigured, canEdit, open, onOpen, onChosen,
 }: {
   businessName: string;
   listing: GoogleListing | null;
   googleConnected: boolean;
   placesConfigured: boolean;
+  crawlerConfigured: boolean;
   canEdit: boolean;
   open: boolean;
   onOpen: (open: boolean) => void;
@@ -329,6 +338,7 @@ function ListingPanel({
   const [gbpError, setGbpError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [link, setLink] = useState(listing?.mapsLink ?? "");
 
   async function search(q: string) {
     setBusy("search");
@@ -356,7 +366,7 @@ function ListingPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  async function choose(body: { placeId: string } | { gbpLocation: string }) {
+  async function choose(body: { placeId: string } | { gbpLocation: string } | { mapsLink: string }) {
     setBusy("choose");
     setError(null);
     try {
@@ -369,7 +379,7 @@ function ListingPanel({
     }
   }
 
-  const chosen = listing?.placeId || listing?.gbpLocation;
+  const chosen = listing?.placeId || listing?.gbpLocation || listing?.mapsLink;
   const name = useMemo(() => listing?.gbpTitle || listing?.title || null, [listing]);
 
   if (!open) {
@@ -379,6 +389,7 @@ function ListingPanel({
           <span className="rv-listing-label">Google listing</span>
           <strong>{name ?? businessName}</strong>
           {listing?.address ? <small>{listing.address}</small> : null}
+          {!listing?.address && listing?.mapsLink ? <small><a href={listing.mapsLink} target="_blank" rel="noreferrer">Google Maps link</a></small> : null}
         </div>
         {canEdit ? <button type="button" className="btn small" onClick={() => onOpen(true)}>Change</button> : null}
       </div>
@@ -395,6 +406,20 @@ function ListingPanel({
         {chosen ? <button type="button" className="socal-pop-close" aria-label="Close" onClick={() => onOpen(false)}>×</button> : null}
       </div>
       {error ? <p className="rv-error">{error}</p> : null}
+
+      <div className="rv-picker-group">
+        <span className="rv-listing-label">Paste the Google Maps link</span>
+        <p className="rv-hint">
+          Open the business on Google Maps, press <b>Share</b>, and copy the link. Its reviews are read from that page.
+        </p>
+        <form className="rv-search" onSubmit={(e) => { e.preventDefault(); void choose({ mapsLink: link.trim() }); }}>
+          <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://maps.app.goo.gl/…" aria-label="Google Maps link" inputMode="url" />
+          <button type="submit" className="btn small primary" disabled={!canEdit || !!busy || !link.trim() || !crawlerConfigured}>
+            {busy === "choose" ? "Reading reviews… (up to a minute)" : "Read reviews"}
+          </button>
+        </form>
+        {!crawlerConfigured ? <p className="rv-hint">Set <code>CRAWLER_SERVICE_URL</code> in .env and start the browser crawler to read Maps links.</p> : null}
+      </div>
 
       {googleConnected ? (
         <div className="rv-picker-group">
@@ -439,7 +464,7 @@ function ListingPanel({
             ) : places ? <p className="rv-hint">No listings found. Try the name as it appears on Google, with the town.</p> : null}
           </>
         ) : (
-          <p className="rv-hint">Add <code>GOOGLE_MAPS_API_KEY</code> to .env (a Google Cloud key with Places API (New) turned on) to search and read public reviews.</p>
+          <p className="rv-hint">Searching needs <code>GOOGLE_MAPS_API_KEY</code> in .env. Pasting the Maps link above works without it.</p>
         )}
       </div>
     </section>

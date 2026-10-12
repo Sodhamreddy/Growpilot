@@ -84,7 +84,8 @@ export default async function ReviewsPage({
   ]);
 
   // Business Profile's reviews once there are any; Places' are then duplicates under other ids.
-  const source = rows.some((r) => r.source === "gbp") ? "gbp" : "places";
+  // The best source with any reviews: Business Profile, then Places, then the Maps page.
+  const source = (["gbp", "places", "maps"] as const).find((s) => rows.some((r) => r.source === s)) ?? "places";
   const reviews: ReviewItem[] = rows.filter((r) => r.source === source).map((r) => ({
     id: r.id,
     source: r.source,
@@ -152,6 +153,7 @@ export default async function ReviewsPage({
               note: gbp?.lastError ?? null,
             }}
             placesConfigured={Boolean(creds.mapsKey)}
+            crawlerConfigured={Boolean(creds.crawlerUrl)}
             hasVoice={Boolean(voice)}
             keywords={keywords(reviews.map((r) => r.comment))}
             canEdit={canEdit}

@@ -6,7 +6,7 @@ import {
   type Database, type GoogleListing, type ReviewReplyDraft, type ReviewSource,
 } from "@ob/db";
 import {
-  GoogleApiError, listGbpReviews, placeReviews, refreshGoogleToken, replyToGbpReview, type FetchedReview,
+  GoogleApiError, listGbpReviews, mapsReviews, placeReviews, refreshGoogleToken, replyToGbpReview, type FetchedReview,
 } from "./google.js";
 import { draftReviewReply, normaliseReply } from "./reply.js";
 import type { ReviewRating } from "./rules.js";
@@ -22,6 +22,8 @@ export const GBP_PROVIDER = "google_business_profile";
 
 /** Places content may be kept no longer than this under Google Maps Platform terms. */
 const PLACES_CACHE_DAYS = 30;
+/** The Maps page is read by a browser; not more often than this per listing. */
+const MAPS_MIN_GAP_MS = 20 * 3600_000;
 
 export interface GoogleCredentials {
   clientId: string | undefined;
@@ -29,6 +31,8 @@ export interface GoogleCredentials {
   encryptionKey: string;
   /** For the Places API. */
   mapsKey: string | undefined;
+  /** The browser crawler service, which reads a listing's public Maps page. */
+  crawlerUrl?: string | undefined;
 }
 
 /** The Google settings this module needs, from the app's config. */
@@ -37,6 +41,7 @@ export function googleCredentials(cfg: {
   GOOGLE_CLIENT_ID?: string; GOOGLE_CLIENT_SECRET?: string;
   GOOGLE_ADS_CLIENT_ID?: string; GOOGLE_ADS_CLIENT_SECRET?: string;
   GOOGLE_MAPS_API_KEY?: string; GOOGLE_API_KEY?: string;
+  CRAWLER_SERVICE_URL?: string;
   CREDENTIAL_ENCRYPTION_KEY: string;
 }): GoogleCredentials {
   // A client and its secret go together; never the id of one with the secret of another.
@@ -51,6 +56,7 @@ export function googleCredentials(cfg: {
     encryptionKey: cfg.CREDENTIAL_ENCRYPTION_KEY,
     // An AI Studio key ("AQ.…") works only for Gemini; only a Cloud key ("AIza…") reaches Places.
     mapsKey: cfg.GOOGLE_MAPS_API_KEY || (cfg.GOOGLE_API_KEY?.startsWith("AIza") ? cfg.GOOGLE_API_KEY : undefined),
+    crawlerUrl: cfg.CRAWLER_SERVICE_URL || undefined,
   };
 }
 
@@ -147,6 +153,7 @@ export async function syncReviews(
   ctx: TenantContext,
   business: { id: string; googleListing: GoogleListing | null },
   creds: GoogleCredentials,
+  opts: { force?: boolean } = {},
 ): Promise<SyncResult> {
   let listing: GoogleListing = { ...(business.googleListing ?? {}) };
   let source: ReviewSource | null = null;
@@ -177,7 +184,9 @@ export async function syncReviews(
 
   if (!source && listing.placeId) {
     if (!creds.mapsKey) {
-      failure = new GoogleApiError("key", "Add GOOGLE_MAPS_API_KEY to .env (a key with Places API (New) turned on) to read this listing's reviews.");
+      if (!listing.mapsLink) {
+        failure = new GoogleApiError("key", "Add GOOGLE_MAPS_API_KEY to .env (a key with Places API (New) turned on), or give the listing's Google Maps link, to read its reviews.");
+      }
     } else {
       try {
         const res = await placeReviews(creds.mapsKey, listing.placeId);
@@ -202,7 +211,42 @@ export async function syncReviews(
     }
   }
 
-  if (!listing.placeId && !listing.gbpLocation) {
+  /*
+   * Last resort: the listing's public Maps page, read by the browser crawler.
+   * Against Google's terms, so only when neither API worked, and at most about
+   * once a day (`force` is a person pressing Sync now). Between reads, the
+   * reviews already saved stand.
+   */
+  if (!source && listing.mapsLink) {
+    // Sync now may re-read sooner than the daily sweep, but never in a tight loop.
+    const gap = opts.force ? 10 * 60_000 : MAPS_MIN_GAP_MS;
+    const fresh = listing.mapsReadAt && Date.now() - Date.parse(listing.mapsReadAt) < gap;
+    if (!creds.crawlerUrl) {
+      failure = new GoogleApiError("other", "CRAWLER_SERVICE_URL is not set in .env, so the Maps page cannot be read.");
+    } else if (fresh) {
+      source = "maps";
+      failure = null;
+    } else {
+      try {
+        const res = await mapsReviews(creds.crawlerUrl, listing.mapsLink);
+        added = await saveReviews(db, ctx, business.id, "maps", res.reviews);
+        source = "maps";
+        failure = null;
+        listing = {
+          ...listing, source, mapsReadAt: new Date().toISOString(),
+          title: listing.title || res.place.title || undefined,
+          mapsUri: listing.mapsUri ?? res.place.url ?? listing.mapsLink,
+          rating: res.place.rating ?? listing.rating ?? null,
+          reviewCount: res.place.reviewCount ?? listing.reviewCount ?? null,
+        };
+      } catch (err) {
+        if (!(err instanceof GoogleApiError)) throw err;
+        failure = err;
+      }
+    }
+  }
+
+  if (!listing.placeId && !listing.gbpLocation && !listing.mapsLink) {
     failure = new GoogleApiError("not_found", "Choose this client's Google listing first.");
   }
 

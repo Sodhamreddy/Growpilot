@@ -8,9 +8,20 @@ const python = process.platform === "win32"
   : resolve(root, "services/crawler/.venv/bin/python");
 const app = resolve(root, "services/crawler/app.py");
 
+/*
+ * Not set up: skip, do not fail.
+ *
+ * The crawler is optional (see its README): without it only JavaScript-heavy
+ * sites fail to crawl. `pnpm dev` runs it under --kill-others-on-fail, so a
+ * non-zero exit here used to stop the web app and worker as well, for a
+ * service nothing else needs to start.
+ */
 if (!existsSync(python)) {
-  console.error("Crawler environment is missing. Follow services/crawler/README.md once, then rerun pnpm dev.");
-  process.exit(1);
+  console.warn(
+    "Browser crawler not set up, so it is skipped. Web app and worker run normally; " +
+    "only JavaScript-heavy sites will not crawl. To enable it, follow services/crawler/README.md once.",
+  );
+  process.exit(0);
 }
 
 const child = spawn(python, [app], { cwd: root, stdio: "inherit", env: process.env });

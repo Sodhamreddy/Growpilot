@@ -405,3 +405,68 @@ export async function replyToGbpReview(
   }, fetcher);
   return { comment: res.comment ?? comment, updatedAt: res.updateTime ?? new Date().toISOString() };
 }
+
+// ─── Public Google Maps page, through the browser crawler ────────────────────
+
+/** Whether a link is a Google Maps address the crawler will open. */
+export function isMapsLink(link: string): boolean {
+  try {
+    const u = new URL(link.trim());
+    const host = u.hostname.toLowerCase();
+    if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+    if (host === "maps.app.goo.gl") return true;
+    if (host === "goo.gl") return u.pathname.startsWith("/maps");
+    if (/^maps\.google\.[a-z.]{2,6}$/.test(host)) return true;
+    return /^(www\.)?google\.[a-z.]{2,6}$/.test(host) && u.pathname.startsWith("/maps");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A listing's newest reviews, read from its public Maps page by the crawler
+ * service (services/crawler). Used only when no Google API is available.
+ * Maps shows relative dates ("3 weeks ago"), so dates are approximate.
+ */
+export async function mapsReviews(
+  crawlerUrl: string,
+  link: string,
+  { limit = 50, fetcher = fetch }: { limit?: number; fetcher?: Fetcher } = {},
+): Promise<{ place: { title: string | null; rating: number | null; reviewCount: number | null; url: string | null }; reviews: FetchedReview[] }> {
+  let res: Response;
+  try {
+    res = await fetcher(`${crawlerUrl.replace(/\/+$/, "")}/maps/reviews`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: link, limit }),
+      signal: AbortSignal.timeout(120_000),
+    });
+  } catch {
+    throw new GoogleApiError("other", "The browser crawler is not running, so the Maps page could not be read. Start it (it runs with npm run dev once set up).");
+  }
+  const body = (await res.json().catch(() => ({}))) as {
+    error?: string; blocked?: boolean; title?: string | null; rating?: number | null; count?: number | null; url?: string | null;
+    reviews?: { id: string; author: string; authorUrl: string | null; photo: string | null; rating: number; text: string | null; reply: string | null; publishedAt: string | null }[];
+  };
+  if (!res.ok) {
+    if (res.status === 429 || body.blocked) throw new GoogleApiError("rate", body.error ?? "Google is showing a traffic check. It will be tried again later.");
+    throw new GoogleApiError(res.status === 422 ? "not_found" : "other", body.error ?? "Google Maps could not be read.");
+  }
+  const now = new Date();
+  return {
+    place: { title: body.title ?? null, rating: body.rating ?? null, reviewCount: body.count ?? null, url: body.url ?? null },
+    reviews: (body.reviews ?? []).map((r) => ({
+      externalId: `maps:${r.id}`,
+      authorName: r.author || "A Google user",
+      authorPhotoUrl: r.photo,
+      authorUrl: r.authorUrl,
+      rating: clampRating(r.rating),
+      comment: r.text,
+      languageCode: null,
+      reviewUrl: null,
+      publishedAt: r.publishedAt ? new Date(r.publishedAt) : now,
+      editedAt: null,
+      googleReply: r.reply ? { comment: r.reply, updatedAt: now.toISOString() } : null,
+    })),
+  };
+}
