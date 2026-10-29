@@ -1,8 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { RichTextEditor } from "./RichTextEditor";
+import { LoadingIndicator } from "./LoadingIndicator";
 
 /**
  * The draft, readable and editable.
@@ -30,9 +31,12 @@ export interface DraftArticle {
 
 const EDITABLE = ["draft", "qa", "needs_changes", "awaiting_approval"];
 
-export function DraftEditor({ article, canEdit }: { article: DraftArticle; canEdit: boolean }) {
+export function DraftEditor({ article, canEdit, initialMode = "preview", onDone, onDirtyChange }: {
+  article: DraftArticle; canEdit: boolean; initialMode?: "preview" | "edit"; onDone?: (saved?: boolean) => void; onDirtyChange?: (dirty: boolean) => void;
+}) {
   const router = useRouter();
-  const [mode, setMode] = useState<"preview" | "edit">("preview");
+  const [refreshing, startRefresh] = useTransition();
+  const [mode, setMode] = useState<"preview" | "edit">(initialMode);
   const [body, setBody] = useState(article.bodyMarkdown);
   const [title, setTitle] = useState(article.title);
   const [metaTitle, setMetaTitle] = useState(article.metaTitle ?? "");
@@ -49,6 +53,13 @@ export function DraftEditor({ article, canEdit }: { article: DraftArticle; canEd
     metaDescription !== (article.metaDescription ?? "");
 
   const words = body.trim() ? body.trim().split(/\s+/).length : 0;
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
 
   async function save() {
     setBusy(true);
@@ -59,6 +70,7 @@ export function DraftEditor({ article, canEdit }: { article: DraftArticle; canEd
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          expectedVersion: article.version,
           title,
           metaTitle: metaTitle.trim() || null,
           metaDescription: metaDescription.trim() || null,
@@ -74,7 +86,8 @@ export function DraftEditor({ article, canEdit }: { article: DraftArticle; canEd
       }
       setSaved(true);
       setMode("preview");
-      router.refresh();
+      onDone?.(true);
+      startRefresh(() => router.refresh());
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -89,18 +102,19 @@ export function DraftEditor({ article, canEdit }: { article: DraftArticle; canEd
     setMetaDescription(article.metaDescription ?? "");
     setMode("preview");
     setError(null);
+    onDone?.();
   }
 
   return (
     <div className="card">
-      <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+      <div className="row draft-toolbar" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap" }}>
         <div className="segmented" role="tablist" aria-label="Preview or edit the draft">
           <button type="button" role="tab" aria-selected={mode === "preview"}
                   onClick={() => setMode("preview")}>
             Preview
           </button>
           <button type="button" role="tab" aria-selected={mode === "edit"}
-                  disabled={!editable} onClick={() => setMode("edit")}>
+                  disabled={!editable || refreshing} onClick={() => setMode("edit")}>
             Edit
           </button>
         </div>
@@ -109,6 +123,10 @@ export function DraftEditor({ article, canEdit }: { article: DraftArticle; canEd
           {words.toLocaleString()} words · v{article.version}
           {dirty ? " · unsaved changes" : ""}
         </span>
+        {editable && (mode === "edit" || Boolean(onDone)) && <div className="row" style={{ gap: 8 }}>
+          <button type="button" className="btn primary" disabled={busy || refreshing || !dirty} onClick={() => void save()}>{busy || refreshing ? <LoadingIndicator label="Saving…" /> : "Save changes"}</button>
+          <button type="button" className="btn" disabled={busy || refreshing} onClick={discard}>{dirty ? "Discard edits" : "Done"}</button>
+        </div>}
       </div>
 
       {!editable && canEdit ? (
@@ -162,18 +180,9 @@ export function DraftEditor({ article, canEdit }: { article: DraftArticle; canEd
             Run the quality gates again afterwards.
           </p>
 
-          <div className="row" style={{ gap: 10 }}>
-            <button type="button" className="btn primary" disabled={busy || !dirty}
-                    onClick={() => void save()}>
-              {busy ? "Saving…" : "Save changes"}
-            </button>
-            <button type="button" className="btn" disabled={busy} onClick={discard}>
-              Discard
-            </button>
-          </div>
         </>
       ) : (
-        <Markdown source={body} />
+        <ArticleMarkdown source={body} />
       )}
 
       {error ? <p className="error" style={{ marginTop: 12 }}>{error}</p> : null}
@@ -190,7 +199,7 @@ export function DraftEditor({ article, canEdit }: { article: DraftArticle; canEd
  * generated string put markup into the dashboard. Escaping is automatic when
  * everything is a React child.
  */
-function Markdown({ source }: { source: string }) {
+export function ArticleMarkdown({ source }: { source: string }) {
   if (!source.trim()) {
     return (
       <div className="empty">

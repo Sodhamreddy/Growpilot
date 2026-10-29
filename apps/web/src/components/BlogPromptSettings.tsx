@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { IconEdit, IconChevron } from "./Icons";
+import { LoadingIndicator } from "./LoadingIndicator";
 
 /**
  * How this workspace wants its blog written.
@@ -53,10 +54,12 @@ const PLACEHOLDER = {
 } as const;
 
 export function BlogPromptSettings({
+  businessId,
   initial,
   canEdit,
   startOpen = false,
 }: {
+  businessId: string;
   initial: BlogPrompts;
   canEdit: boolean;
   /**
@@ -101,7 +104,7 @@ export function BlogPromptSettings({
       const res = await fetch("/api/blog/prompts", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(v),
+        body: JSON.stringify({ ...v, businessId }),
       });
       if (!res.ok) {
         const body: unknown = await res.json();
@@ -203,7 +206,7 @@ export function BlogPromptSettings({
               <button type="button" className="btn primary"
                       disabled={busy || !dirty || tooLong.length > 0}
                       onClick={() => void save()}>
-                {busy ? "Saving…" : "Save instructions"}
+                {busy ? <LoadingIndicator label="Saving…" /> : "Save instructions"}
               </button>
               <button type="button" className="btn" disabled={busy || !dirty}
                       onClick={() => { setV(initial); setError(null); setSaved(false); }}>

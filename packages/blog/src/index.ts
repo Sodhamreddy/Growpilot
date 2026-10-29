@@ -14,4 +14,8 @@ export * from "./plan.js";
 export * from "./brief.js";
 export * from "./article.js";
 export * from "./revise.js";
+export * from "./improvements.js";
+export * from "./improvement-preview.js";
+
 export * from "./measurement.js";
+export * from "./keyword-provider.js";

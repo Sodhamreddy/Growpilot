@@ -2,6 +2,11 @@
 
 import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
+import { BlogBriefWorkspace } from "./BlogBriefWorkspace";
+import { IconSpark } from "./Icons";
+import styles from "./BlogQueue.module.css";
+import { LoadingIndicator } from "./LoadingIndicator";
 
 /**
  * Topic suggestions — the entry point to blog automation.
@@ -47,9 +52,10 @@ export function TopicSuggester({
 }) {
   const router = useRouter();
   const started = useRef(false);
+  const inFlight = useRef(false);
   const [suggestions, setSuggestions] = useState<Suggestion[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [accepting, setAccepting] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Suggestion | null>(null);
   /*
    * Per-suggestion edits, keyed by the original title.
    *
@@ -68,11 +74,13 @@ export function TopicSuggester({
   const setEdit = (s: Suggestion, patch: Partial<{ title: string; keyword: string }>) =>
     setEdits((current) => ({
       ...current,
-      [s.title]: { ...editOf(s), ...patch },
+      [s.title]: { ...(current[s.title] ?? { title: s.title, keyword: s.primaryKeyword }), ...patch },
     }));
   const [error, setError] = useState<string | null>(null);
 
   async function generate() {
+    if (inFlight.current || !canEdit || blockedReason) return;
+    inFlight.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -91,46 +99,15 @@ export function TopicSuggester({
       }
       const list = (parsed as { topics?: Suggestion[] }).topics ?? [];
       setSuggestions(list);
+      setEdits({}); setOpenEditor(null);
       if (list.length === 0) {
         setError("The model returned no usable topics. Try again, or add more services.");
       }
     } catch {
       setError("Could not reach the server.");
     } finally {
+      inFlight.current = false;
       setLoading(false);
-    }
-  }
-
-  async function accept(s: Suggestion) {
-    setAccepting(s.title);
-    setError(null);
-    try {
-      const res = await fetch("/api/topics/suggest", {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          businessId,
-          title: editOf(s).title.trim(),
-          primaryKeyword: editOf(s).keyword.trim(),
-          intent: s.intent,
-          rationale: s.rationale,
-        }),
-      });
-      const parsed: unknown = await res.json();
-      if (!res.ok) {
-        setError(
-          (parsed as { error?: { message?: string } }).error?.message ??
-            "Could not start that article.",
-        );
-        return;
-      }
-      // Remove the accepted one; the rest stay available to pick next.
-      setSuggestions((cur) => cur?.filter((x) => x.title !== s.title) ?? null);
-      router.refresh();
-    } catch {
-      setError("Could not reach the server.");
-    } finally {
-      setAccepting(null);
     }
   }
 
@@ -142,21 +119,20 @@ export function TopicSuggester({
    * development double-invoke does not spend two model calls.
    */
   useEffect(() => {
-    if (!autoRun || blockedReason || started.current) return;
+    if (!autoRun || !canEdit || blockedReason || started.current) return;
     started.current = true;
     void generate();
     // generate() is stable for the life of this mount.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRun, blockedReason]);
+  }, [autoRun, canEdit, blockedReason]);
 
   if (blockedReason) {
     // In compact mode the header button is already disabled with the reason on
     // it, so a second full-width warning would say the same thing twice.
     if (compact) return null;
     return (
-      <div className="card" style={{ marginBottom: 22, borderColor: "var(--warn)" }}>
-        <strong style={{ fontSize: 14 }}>Not ready to suggest topics</strong>
-        <p className="muted small" style={{ margin: "6px 0 0", maxWidth: "70ch" }}>
+      <div className={styles.notice}>
+        <strong>Not ready to suggest topics</strong>
+        <p>
           {blockedReason}
         </p>
       </div>
@@ -173,118 +149,125 @@ export function TopicSuggester({
   if (compact && !suggestions && !loading && !error) return null;
 
   return (
-    <div className="card" style={{ marginBottom: 22 }}>
+    <div className={styles.suggestions}>
+      {selected && canEdit ? createPortal(<BlogBriefWorkspace
+        key={selected.title}
+        businessId={businessId}
+        suggestion={{ ...selected, title: editOf(selected).title, primaryKeyword: editOf(selected).keyword }}
+        onClose={() => setSelected(null)}
+        onReject={() => {
+          setSuggestions((current) => current?.filter((item) => item.title !== selected.title) ?? null);
+          setSelected(null);
+        }}
+        onGenerated={(articleId) => {
+          setSuggestions((current) => current?.filter((item) => item.title !== selected.title) ?? null);
+          setSelected(null);
+          router.push(`/articles/${articleId}`);
+          router.refresh();
+        }}
+      />, document.body) : null}
       {compact ? null : (
-        <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start" }}>
-          <div style={{ maxWidth: "62ch" }}>
-            <strong style={{ fontSize: 14 }}>Suggest topics</strong>
-            <p className="muted small" style={{ margin: "6px 0 0" }}>
-              Five topics drawn from your services and locations, with the reasoning for each.
-              These are a judgement about what buyers in your field are asking now — not measured
-              search-trend data, which needs a keyword provider we do not have connected.
-            </p>
-          </div>
+        <div className={styles.panelHeader}>
+          <div><h2>Topic ideas</h2><p>Ideas based on your services and locations. Choose one to review its brief.</p></div>
           {canEdit ? (
-            <button type="button" className="btn primary" disabled={loading} onClick={() => void generate()}>
-              {loading ? "Thinking…" : suggestions ? "Suggest again" : "Generate topics"}
+            <button type="button" className={`${styles.button} ${styles.primary}`} disabled={loading || selected !== null} onClick={() => void generate()}>
+              {loading ? "Finding ideas…" : suggestions ? "Find more ideas" : "Find topic ideas"}
             </button>
           ) : null}
         </div>
       )}
 
-      {compact && suggestions ? (
-        <div className="row" style={{ justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <strong style={{ fontSize: 14 }}>Suggested topics</strong>
-          <span className="small muted">
-            A judgement about what buyers are asking now — not measured search data.
-          </span>
+      {compact ? (
+        <div className={styles.ideaToolbar}>
+          <span role="status">{loading ? "Finding ideas for your business…" : suggestions ? `${suggestions.length} ${suggestions.length === 1 ? "idea" : "ideas"} to review` : "Topic ideas"}</span>
+          {canEdit && <button type="button" className={styles.button} disabled={loading || selected !== null} onClick={() => void generate()}><IconSpark size={15} /> {loading ? "Finding ideas…" : "Find more ideas"}</button>}
         </div>
       ) : null}
 
       {error ? (
-        <p className="small" style={{ color: "var(--danger)", margin: "12px 0 0" }}>{error}</p>
+        <p className={styles.error} role="alert">{error}</p>
       ) : null}
 
-      {loading && !suggestions ? (
-        <p className="small muted" style={{ margin: "14px 0 0" }}>
-          Reading your services and locations…
+      {loading ? (
+        <p className={styles.ideaLoading}>
+          <LoadingIndicator label={suggestions ? "Refreshing topic ideas…" : "Finding topic ideas…"} />
         </p>
       ) : null}
 
       {suggestions && suggestions.length > 0 ? (
-        <div style={{ marginTop: 18 }}>
+        <div className={styles.ideaList}>
           {suggestions.map((s) => (
-            <div className="finding" key={s.title}>
-              <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
-                <div style={{ flex: 1 }}>
-                  <strong>{editOf(s).title}</strong>
-                  <div className="row" style={{ gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                    <span className="badge neutral">{INTENT_LABEL[s.intent] ?? s.intent}</span>
-                    {s.service ? <span className="badge neutral">{s.service}</span> : null}
-                    {s.location ? <span className="badge ok">{s.location}</span> : null}
-                    <span className="badge neutral">fit {Math.round(s.fit * 100)}%</span>
+            <article className={styles.ideaCard} key={s.title}>
+                <div className={styles.ideaCopy}>
+                  <h3>{editOf(s).title}</h3>
+                  <div className={styles.ideaMeta}>
+                    <span>{INTENT_LABEL[s.intent] ?? s.intent}</span>
+                    {s.service ? <span>{s.service}</span> : null}
+                    {s.location ? <span>{s.location}</span> : null}
                   </div>
-                  <div className="suggestion" style={{ marginTop: 8 }}>{s.rationale}</div>
+                  <p className={styles.ideaRationale}>{s.rationale}</p>
 
                   {openEditor === s.title ? (
-                    <div className="formgrid" style={{ marginTop: 12 }}>
-                      <label className="field" style={{ marginBottom: 0 }}>
-                        <span className="fieldlabel">Title</span>
+                    <div className={styles.ideaFields}>
+                      <label>
+                        <span>Title</span>
                         <input
                           type="text"
                           value={editOf(s).title}
+                          maxLength={200}
+                          disabled={loading}
                           onChange={(e) => setEdit(s, { title: e.target.value })}
                         />
                       </label>
-                      <label className="field" style={{ marginBottom: 0 }}>
-                        <span className="fieldlabel">Focus keyword</span>
+                      <label>
+                        <span>Focus keyword</span>
                         <input
                           type="text"
                           value={editOf(s).keyword}
+                          maxLength={120}
+                          disabled={loading}
                           onChange={(e) => setEdit(s, { keyword: e.target.value })}
                         />
-                        <span className="hint">
-                          What the article is written to rank for. It shapes the brief, the
-                          headings and the meta description.
-                        </span>
+                        <small>The search phrase this article should address.</small>
                       </label>
                     </div>
                   ) : (
-                    <div className="small muted mono" style={{ marginTop: 6 }}>
-                      focus keyword: {editOf(s).keyword}
+                    <div className={styles.ideaKeyword}>
+                      Focus keyword: <span>{editOf(s).keyword}</span>
                     </div>
                   )}
                 </div>
 
                 {canEdit ? (
-                  <div style={{ display: "grid", gap: 8, minWidth: 120 }}>
+                  <div className={styles.ideaActions}>
                     <button
                       type="button"
-                      className="btn primary"
+                      className={`${styles.button} ${styles.primary}`}
                       disabled={
-                        accepting !== null ||
-                        editOf(s).title.trim() === "" ||
-                        editOf(s).keyword.trim() === ""
+                        loading || selected !== null ||
+                        editOf(s).title.trim().length < 4 ||
+                        editOf(s).keyword.trim().length < 2
                       }
-                      onClick={() => void accept(s)}
+                      onClick={() => setSelected(s)}
                     >
-                      {accepting === s.title ? "Starting…" : "Write this"}
+                      Review brief
                     </button>
                     <button
                       type="button"
-                      className="btn small"
-                      disabled={accepting !== null}
+                      className={styles.textButton}
+                      disabled={loading || selected !== null}
                       onClick={() => setOpenEditor(openEditor === s.title ? null : s.title)}
                     >
-                      {openEditor === s.title ? "Done" : "Edit"}
+                      {openEditor === s.title ? "Done editing" : "Edit idea"}
                     </button>
                   </div>
                 ) : null}
-              </div>
-            </div>
+            </article>
           ))}
         </div>
       ) : null}
+      {suggestions?.length === 0 && !loading && !error && <p className={styles.ideaNote}>No ideas left to review. Find more ideas when you&rsquo;re ready to create another blog.</p>}
+      {suggestions && suggestions.length > 0 && <p className={styles.ideaNote}>These ideas are based on your business profile. Search volume is shown only when measured keyword data is available.</p>}
     </div>
   );
 }

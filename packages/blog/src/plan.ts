@@ -24,6 +24,8 @@ export interface ClusterInput {
     id: string;
     term: string;
     opportunityScore: number | null;
+    /** Bounded adjustment from this client's observed search performance. */
+    performanceBoost?: number;
     volume: number | null;
     /** Business fit, 0–1. The ranking basis when there is no market data. */
     relevance?: number | null;
@@ -43,6 +45,8 @@ export interface PlannedTopic {
 }
 
 export interface PlanOptions {
+  /** Keywords already covered by a topic; removed before ranking and limits. */
+  excludedKeywordIds?: ReadonlySet<string>;
   /** How many topics to schedule. */
   limit?: number;
   /** Articles published per week. */
@@ -73,8 +77,8 @@ export function buildContentPlan(clusters: ClusterInput[], opts: PlanOptions = {
     // Best term leads: opportunity where we have market data, then relevance,
     // then volume, then the longest phrase — longer terms are usually more
     // specific and easier to rank for.
-    const ranked = [...cluster.terms].sort((a, b) => {
-      const byScore = (b.opportunityScore ?? -1) - (a.opportunityScore ?? -1);
+    const ranked = cluster.terms.filter((term) => !opts.excludedKeywordIds?.has(term.id)).sort((a, b) => {
+      const byScore = ((b.opportunityScore ?? (b.relevance ?? 0.5) * 100) + (b.performanceBoost ?? 0)) - ((a.opportunityScore ?? (a.relevance ?? 0.5) * 100) + (a.performanceBoost ?? 0));
       if (byScore !== 0) return byScore;
       const byRelevance = (b.relevance ?? -1) - (a.relevance ?? -1);
       if (byRelevance !== 0) return byRelevance;
@@ -101,7 +105,7 @@ export function buildContentPlan(clusters: ClusterInput[], opts: PlanOptions = {
      * opportunity score uses, and centred at 50 when even that is missing so a
      * term with no signal at all sits mid-pack rather than winning.
      */
-    const clusterScore = head.opportunityScore ?? (head.relevance != null ? head.relevance * 100 : 50);
+    const clusterScore = (head.opportunityScore ?? (head.relevance != null ? head.relevance * 100 : 50)) + (head.performanceBoost ?? 0);
 
     candidates.push({
       title: pillarTitle(head.term, intent),
@@ -123,7 +127,7 @@ export function buildContentPlan(clusters: ClusterInput[], opts: PlanOptions = {
           secondaryTerms: [],
           intent,
           priority:
-            (term.opportunityScore ?? (term.relevance != null ? term.relevance * 90 : 40)) *
+            ((term.opportunityScore ?? (term.relevance != null ? term.relevance * 90 : 40)) + (term.performanceBoost ?? 0)) *
             INTENT_WEIGHT[intent],
           role: "spoke",
           clusterId: cluster.id,
@@ -274,4 +278,11 @@ function lower(s: string): string {
     .split(/\s+/)
     .map((w) => (ACRONYMS.has(w.toLowerCase()) ? ACRONYMS.get(w.toLowerCase())! : w.toLowerCase()))
     .join(" ");
+}
+
+/** A modest priority boost for observed demand with room to earn more clicks. No signal means no change. */
+export function searchPerformanceBoost(impressions: number, clicks: number): number {
+  if (!Number.isFinite(impressions) || !Number.isFinite(clicks) || impressions < 100 || clicks < 0) return 0;
+  const ctr = Math.min(1, clicks / impressions);
+  return Math.min(10, Math.log10(impressions) * 2) * (1 - ctr);
 }

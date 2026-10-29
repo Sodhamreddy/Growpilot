@@ -23,6 +23,7 @@ import { db, getGateway } from "@/lib/services";
  */
 
 const schema = z.object({
+  expectedVersion: z.number().int().positive(),
   sectionId: z.string().min(1).max(8),
   instruction: z.string().trim().min(3, "Say what you want changed.").max(1000),
 });
@@ -38,6 +39,9 @@ export const POST = route(
     const database = db();
 
     const article = await repo.getArticle(database, ctx, id);
+    if (body.expectedVersion !== article.version) {
+      throw new AppError("conflict", "The draft changed. Refresh before choosing a section to revise.", { retryable: false });
+    }
 
     /*
      * Refuse on a state that cannot accept the result.
@@ -127,6 +131,7 @@ export const POST = route(
 
     return {
       ok: true,
+      expectedVersion: article.version,
       sectionId: body.sectionId,
       heading: section.heading,
       before: section.content,

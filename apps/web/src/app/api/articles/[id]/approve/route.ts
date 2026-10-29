@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { AppError } from "@ob/core";
 import { articles, repo } from "@ob/db";
 import { assertTransition, assertMayApprove } from "@ob/pipeline";
@@ -18,6 +18,7 @@ import { db } from "@/lib/services";
  */
 
 const schema = z.object({
+  expectedVersion: z.number().int().positive(),
   /*
    * "note" records a comment without changing the article's state.
    *
@@ -37,6 +38,9 @@ export const POST = route(async (ctx, req) => {
   const database = db();
 
   const article = await repo.getArticle(database, ctx, id);
+  if (body.expectedVersion !== article.version) {
+    throw new AppError("conflict", "The draft changed. Review the latest version before making a decision.", { retryable: false });
+  }
 
   if (body.decision === "note") {
     if (!body.note?.trim()) {
@@ -59,10 +63,12 @@ export const POST = route(async (ctx, req) => {
 
   if (body.decision === "request_changes") {
     assertTransition(article.status, "needs_changes");
-    await database
+    const [changed] = await database
       .update(articles)
-      .set({ status: "needs_changes", updatedAt: new Date() })
-      .where(eq(articles.id, id));
+      .set({ status: "needs_changes", approvedAt: null, approvedBy: null, updatedAt: new Date() })
+      .where(and(eq(articles.id, id), eq(articles.workspaceId, ctx.workspaceId),
+        eq(articles.version, article.version), eq(articles.status, article.status))).returning({ id: articles.id });
+    if (!changed) throw new AppError("conflict", "The article changed. Refresh before requesting changes.", { retryable: false });
 
     await repo.writeAudit(database, ctx, {
       action: "article.changes_requested",
@@ -106,10 +112,12 @@ export const POST = route(async (ctx, req) => {
 
   assertTransition(article.status, "approved");
 
-  await database
+  const [approved] = await database
     .update(articles)
     .set({ status: "approved", approvedBy: ctx.userId, approvedAt: new Date(), updatedAt: new Date() })
-    .where(eq(articles.id, id));
+    .where(and(eq(articles.id, id), eq(articles.workspaceId, ctx.workspaceId),
+      eq(articles.version, article.version), eq(articles.status, article.status))).returning({ id: articles.id });
+  if (!approved) throw new AppError("conflict", "The article changed. Review the current version before approving.", { retryable: false });
 
   await repo.writeAudit(database, ctx, {
     action: "article.approved",

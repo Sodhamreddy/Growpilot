@@ -3,12 +3,13 @@ import { AppError, slugify } from "@ob/core";
 import {
   articles, articleRevisions, articleScores, qualityGateResults, topics, keywords,
   businesses, sourcePages, businessSources, workspaces, repo,
+  type ContentBrief,
 } from "@ob/db";
 import { DEFAULT_VOICE_PROFILE, DEFAULT_BANNED_TERMS } from "@ob/voice";
 import { retrieve } from "@ob/kb";
-import { runAllGates, statusAfterGates, assertTransition } from "@ob/pipeline";
-import { generateArticle, generateBrief } from "@ob/blog";
-import { parseHtml } from "@ob/seo";
+import { runAllGates, statusAfterGates, assertTransition, type GateContext } from "@ob/pipeline";
+import { generateArticle, generateBrief, improveGeneratedArticleQuality, type GeneratedArticle } from "@ob/blog";
+import { parseHtml, extractStructure } from "@ob/seo";
 import { JOBS, payloadFrom } from "@ob/jobs";
 import type { WorkerContext } from "../../context.js";
 import { contextFromPayload } from "../../context.js";
@@ -26,6 +27,9 @@ export interface ArticlePayload {
   userId: string;
   correlationId: string;
   articleId: string;
+  articleVersion?: number;
+  /** Only the generation job sets this. Manual QA never rewrites an article. */
+  generationQuality?: { brief: ContentBrief; primaryKeyword: string };
 }
 
 export async function processGenerateArticle(
@@ -136,6 +140,7 @@ export async function processGenerateArticle(
     });
 
     const nextVersion = article.version + 1;
+    const generatedSlug = await uniqueSlug(wc, ctx.workspaceId, article.businessId, generated.slug, article.id);
 
     await wc.db.transaction(async (tx) => {
       await tx.insert(articleRevisions).values({
@@ -151,7 +156,7 @@ export async function processGenerateArticle(
         .update(articles)
         .set({
           title: generated.title,
-          slug: await uniqueSlug(wc, ctx.workspaceId, article.businessId, generated.slug, article.id),
+          slug: generatedSlug,
           metaTitle: generated.metaTitle,
           metaDescription: generated.metaDescription,
           bodyMarkdown: generated.bodyMarkdown,
@@ -171,7 +176,9 @@ export async function processGenerateArticle(
       after: { version: nextVersion, wordCount: generated.wordCount },
     });
 
-    await wc.queues.enqueue("qa", JOBS.runQualityGates, payloadFrom(ctx, { articleId: article.id }));
+    await wc.queues.enqueue("qa", JOBS.runQualityGates, payloadFrom(ctx, {
+      articleId: article.id, articleVersion: nextVersion, generationQuality: { brief, primaryKeyword },
+    }));
 
     return { wordCount: generated.wordCount };
   } catch (err) {
@@ -186,6 +193,18 @@ export async function processRunQualityGates(
 ): Promise<{ publishable: boolean; score: number }> {
   const ctx = contextFromPayload(payload);
   const article = await repo.getArticle(wc.db, ctx, payload.articleId);
+
+  if (payload.articleVersion !== undefined && payload.articleVersion !== article.version) {
+    throw new AppError("conflict", "The article changed. Run QA on the current version.", { retryable: false });
+  }
+  if (!["draft", "qa", "needs_changes", "awaiting_approval"].includes(article.status)) {
+    throw new AppError("conflict", "This article is no longer an editable draft for QA.", { retryable: false });
+  }
+  if (article.status !== "qa") assertTransition(article.status, "qa");
+  const [claimed] = await wc.db.update(articles).set({ status: "qa", approvedAt: null, approvedBy: null })
+    .where(and(eq(articles.id, article.id), eq(articles.workspaceId, ctx.workspaceId),
+      eq(articles.version, article.version), eq(articles.status, article.status))).returning({ id: articles.id });
+  if (!claimed) throw new AppError("conflict", "The article changed before QA started. Refresh and try again.", { retryable: false });
 
   const business = await repo.getBusiness(wc.db, ctx, article.businessId);
   const facts = await repo.listFacts(wc.db, ctx, article.businessId);
@@ -204,7 +223,7 @@ export async function processRunQualityGates(
     : undefined;
 
   const primaryKeyword =
-    (await resolvePrimaryKeyword(wc, ctx.workspaceId, topic?.primaryKeywordId)) ?? article.title;
+    (await resolvePrimaryKeyword(wc, ctx.workspaceId, topic?.primaryKeywordId)) ?? payload.generationQuality?.primaryKeyword ?? article.title;
 
   const evidence = await retrieve(wc.db, wc.gateway, ctx, {
     businessId: article.businessId,
@@ -212,9 +231,9 @@ export async function processRunQualityGates(
     limit: 10,
   });
 
-  const parsed = extractStructure(article.bodyMarkdown, article.title);
+  const parsed = extractStructure(article.bodyMarkdown, article.title, business.websiteUrl);
 
-  const result = await runAllGates(wc.gateway, ctx, {
+  const gateContext: GateContext = {
     article: {
       title: article.title,
       slug: article.slug,
@@ -229,6 +248,7 @@ export async function processRunQualityGates(
     },
     primaryKeyword,
     secondaryKeywords: topic?.secondaryTerms ?? [],
+    searchIntent: topic?.intent ?? payload.generationQuality?.brief.searchIntent,
     business,
     facts,
     evidence,
@@ -238,9 +258,60 @@ export async function processRunQualityGates(
     settings: workspace?.settings ?? {},
     hasCta: parsed.hasCta,
     ctaText: parsed.ctaText,
-  });
+  };
+  let result = await runAllGates(wc.gateway, ctx, gateContext);
+  let improved: GeneratedArticle | null = null;
+  let improvementAttempts = 0;
+  const initialScore = result.score.total;
+  const minimumScore = Math.max(70, workspace?.settings.minSeoScoreToPublish ?? 70);
+
+  if (payload.generationQuality && payload.articleVersion === article.version) {
+    const setup = workspace?.settings.onboarding;
+    const quality = await improveGeneratedArticleQuality(wc.gateway, ctx, {
+      business, facts, evidence,
+      voice: voice ? { profile: voice.profile, bannedTerms: voice.bannedTerms, preferredTerms: voice.preferredTerms, samples: voice.samples }
+        : { profile: { ...DEFAULT_VOICE_PROFILE, ...(setup?.tone ? { tone: [setup.tone] } : {}) }, bannedTerms: [...DEFAULT_BANNED_TERMS], preferredTerms: [], samples: [] },
+      brief: payload.generationQuality.brief, primaryKeyword, secondaryKeywords: topic?.secondaryTerms ?? [],
+      title: article.title, contentThemes: setup?.contentPillars ?? [],
+      instructions: business.prompts?.blog?.article, reference: business.prompts?.blog?.reference,
+    }, {
+      title: article.title, slug: article.slug, metaTitle: article.metaTitle ?? "", metaDescription: article.metaDescription ?? "",
+      bodyMarkdown: article.bodyMarkdown, internalLinks: parsed.internalLinks, wordCount: article.wordCount ?? 0,
+    }, result, async (candidate) => {
+      const structure = extractStructure(candidate.bodyMarkdown, candidate.title, business.websiteUrl);
+      return runAllGates(wc.gateway, ctx, {
+        ...gateContext,
+        article: { ...gateContext.article, ...candidate, ...structure },
+        hasCta: structure.hasCta, ctaText: structure.ctaText,
+      });
+    }, minimumScore);
+    result = quality.assessment;
+    improvementAttempts = quality.attempts;
+    if (quality.improved) improved = quality.article;
+
+    if (result.score.total < minimumScore) {
+      const message = `The generated draft scored ${result.score.total.toFixed(1)}, below the minimum of ${minimumScore}, after bounded quality improvement. Review the findings before approval.`;
+      const seo = result.gates.find((gate) => gate.gate === "seo");
+      if (seo) { seo.verdict = "fail"; seo.findings.push({ severity: "error", message, suggestion: "Improve the flagged content or add verified facts and relevant source pages, then run quality checks again.", location: "generationQuality" }); }
+      result.publishable = false;
+      result.blockingReasons.push(message);
+    }
+  }
+  const scoredVersion = article.version + (improved ? 1 : 0);
+  const improvedSlug = improved ? await uniqueSlug(wc, ctx.workspaceId, article.businessId, improved.slug, article.id) : null;
 
   await wc.db.transaction(async (tx) => {
+    const nextStatus = statusAfterGates(result.publishable, workspace?.settings ?? {});
+    assertTransition("qa", nextStatus);
+    const [saved] = await tx.update(articles).set({
+      status: nextStatus, seoScore: result.score.total, voiceScore: result.voiceScore, updatedAt: new Date(),
+      ...(improved ? { title: improved.title, slug: improvedSlug!, metaTitle: improved.metaTitle, metaDescription: improved.metaDescription,
+        bodyMarkdown: improved.bodyMarkdown, wordCount: improved.wordCount, version: scoredVersion } : {}),
+    }).where(and(eq(articles.id, article.id), eq(articles.workspaceId, ctx.workspaceId),
+      eq(articles.version, article.version), eq(articles.status, "qa"))).returning({ id: articles.id });
+    if (!saved) throw new AppError("conflict", "The article changed during QA. Run QA again for the latest version.", { retryable: false });
+    if (improved) await tx.insert(articleRevisions).values({ workspaceId: ctx.workspaceId, articleId: article.id,
+      version: scoredVersion, title: improved.title, bodyMarkdown: improved.bodyMarkdown, authoredBy: "ai" });
     // Gate results are versioned — re-running never loses the prior verdict.
     await tx
       .delete(qualityGateResults)
@@ -248,7 +319,7 @@ export async function processRunQualityGates(
         and(
           eq(qualityGateResults.workspaceId, ctx.workspaceId),
           eq(qualityGateResults.articleId, article.id),
-          eq(qualityGateResults.articleVersion, article.version),
+          eq(qualityGateResults.articleVersion, scoredVersion),
         ),
       );
 
@@ -256,7 +327,7 @@ export async function processRunQualityGates(
       result.gates.map((g) => ({
         workspaceId: ctx.workspaceId,
         articleId: article.id,
-        articleVersion: article.version,
+        articleVersion: scoredVersion,
         gate: g.gate,
         verdict: g.verdict,
         score: g.score,
@@ -269,7 +340,7 @@ export async function processRunQualityGates(
       .values({
         workspaceId: ctx.workspaceId,
         articleId: article.id,
-        articleVersion: article.version,
+        articleVersion: scoredVersion,
         total: result.score.total,
         components: result.score.components,
       })
@@ -278,18 +349,6 @@ export async function processRunQualityGates(
         set: { total: result.score.total, components: result.score.components },
       });
 
-    const nextStatus = statusAfterGates(result.publishable, workspace?.settings ?? {});
-    assertTransition(article.status, nextStatus);
-
-    await tx
-      .update(articles)
-      .set({
-        status: nextStatus,
-        seoScore: result.score.total,
-        voiceScore: result.voiceScore,
-        updatedAt: new Date(),
-      })
-      .where(eq(articles.id, article.id));
   });
 
   await repo.writeAudit(wc.db, ctx, {
@@ -299,6 +358,8 @@ export async function processRunQualityGates(
     after: {
       publishable: result.publishable,
       score: result.score.total,
+      version: scoredVersion,
+      ...(payload.generationQuality ? { initialScore, improvementAttempts, improved: Boolean(improved) } : {}),
       verdicts: Object.fromEntries(result.gates.map((g) => [g.gate, g.verdict])),
     },
   });
@@ -405,70 +466,4 @@ async function uniqueSlug(
   return `${base}-${Date.now()}`;
 }
 
-/**
- * Pull structure out of the markdown body.
- *
- * Rendering markdown to HTML and reusing the crawler's parser would double the
- * dependency surface for no gain; these patterns are enough for the checks the
- * gates run.
- */
-function extractStructure(markdown: string, title?: string): {
-  headings: { level: number; text: string }[];
-  internalLinks: { url: string; anchor: string }[];
-  externalLinks: { url: string; anchor: string }[];
-  images: { src: string; alt: string | null }[];
-  hasCta: boolean;
-  ctaText: string | null;
-} {
-  const headings: { level: number; text: string }[] = [];
-  for (const m of markdown.matchAll(/^(#{1,6})\s+(.+)$/gm)) {
-    headings.push({ level: m[1]!.length, text: m[2]!.trim() });
-  }
-
-  /*
-   * The title is the H1.
-   *
-   * It is stored in its own column and rendered as the page heading, so the
-   * body deliberately starts at H2 — repeating it inside the markdown would
-   * publish two H1s. The SEO gate only ever saw the body, found no `#`, and
-   * failed *every* article with "The article has no H1 heading", an error
-   * severe enough to block approval. Nothing was wrong with the articles; the
-   * gate was reading half the document.
-   *
-   * Added only when the body does not already carry one, so an article that
-   * does open with `#` is still correctly told it has two.
-   */
-  if (title?.trim() && !headings.some((h) => h.level === 1)) {
-    headings.unshift({ level: 1, text: title.trim() });
-  }
-
-  const images: { src: string; alt: string | null }[] = [];
-  for (const m of markdown.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)) {
-    images.push({ src: m[2]!.trim(), alt: m[1]!.trim() || null });
-  }
-
-  const internalLinks: { url: string; anchor: string }[] = [];
-  const externalLinks: { url: string; anchor: string }[] = [];
-  // Negative lookbehind skips image markup, which shares the link syntax.
-  for (const m of markdown.matchAll(/(?<!!)\[([^\]]+)\]\(([^)]+)\)/g)) {
-    const link = { anchor: m[1]!.trim(), url: m[2]!.trim() };
-    if (/^https?:\/\//i.test(link.url)) externalLinks.push(link);
-    else internalLinks.push(link);
-  }
-
-  const ctaMatch =
-    /\b(book|schedule|arrange|request|contact|call|email|buy|order|get started|sign up|learn more)\b[^.!?\n]*/i.exec(
-      markdown,
-    );
-
-  return {
-    headings,
-    internalLinks,
-    externalLinks,
-    images,
-    hasCta: ctaMatch !== null,
-    ctaText: ctaMatch?.[0]?.trim().slice(0, 120) ?? null,
-  };
-}
-
-export { parseHtml, businesses };
+export { parseHtml, businesses, extractStructure };

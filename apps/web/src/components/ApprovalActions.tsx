@@ -1,7 +1,9 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { LoadingIndicator } from "./LoadingIndicator";
+import styles from "./ArticleReviewWorkspace.module.css";
 
 /**
  * Approve / request-changes controls.
@@ -12,14 +14,22 @@ import { useRouter } from "next/navigation";
  */
 export function ApprovalActions({
   articleId,
+  version,
   canApprove,
   canRequestChanges,
   canPublish,
   canRunQa,
   publishTarget,
   published,
+  compact = false,
+  approveDisabledReason,
+  requestChangesDisabledReason,
+  reviewHelpId,
+  articleStatus,
+  onBusyChange,
 }: {
   articleId: string;
+  version: number;
   canApprove: boolean;
   canRequestChanges: boolean;
   /** Approved, and a publishing destination is connected. */
@@ -29,21 +39,29 @@ export function ApprovalActions({
   /** Which CMS the article would go to, e.g. "wordpress". */
   publishTarget: string | null;
   published: boolean;
+  compact?: boolean;
+  approveDisabledReason?: string;
+  requestChangesDisabledReason?: string;
+  reviewHelpId?: string;
+  articleStatus?: string;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; detail?: string } | null>(null);
   const [note, setNote] = useState("");
+  const [qaNotice, setQaNotice] = useState("");
 
   async function submit(decision: "approve" | "request_changes" | "note") {
     setBusy(true);
     setError(null);
+    setQaNotice("");
     try {
       const res = await fetch(`/api/articles/${articleId}/approve`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ decision, note: note || undefined }),
+        body: JSON.stringify({ decision, note: note || undefined, expectedVersion: version }),
       });
       const body: unknown = await res.json();
 
@@ -110,6 +128,7 @@ export function ApprovalActions({
   async function runQa() {
     setBusy(true);
     setError(null);
+    setQaNotice("");
     try {
       const res = await fetch(`/api/articles/${articleId}/qa`, { method: "POST" });
       const body: unknown = await res.json();
@@ -118,6 +137,14 @@ export function ApprovalActions({
         setError({ message: err?.message ?? "QA did not start." });
         return;
       }
+      setQaNotice("Quality checks requested. Results will update here when background processing finishes.");
+      try {
+        const health = await fetch("/api/jobs/status", { cache: "no-store", signal: AbortSignal.timeout(5000) });
+        if (health.ok) {
+          const status = await health.json() as { worker?: { online: boolean } };
+          if (status.worker?.online === false) setQaNotice("Quality checks were queued while the worker was offline. They will run when background processing reconnects.");
+        }
+      } catch { /* A health-check failure does not undo the accepted QA request. */ }
       startTransition(() => router.refresh());
     } catch {
       setError({ message: "Could not reach the server. Check your connection and try again." });
@@ -127,9 +154,39 @@ export function ApprovalActions({
   }
 
   const disabled = busy || pending;
+  useEffect(() => { onBusyChange?.(disabled); }, [disabled, onBusyChange]);
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
 
+  if (compact) return <div className={styles.approval}>
+    {disabled && <LoadingIndicator label="Updating article…" />}
+    {canRunQa && !canApprove && <button type="button" className={`${styles.primaryButton} ${styles.qaAction}`} disabled={disabled} onClick={() => void runQa()}>Run quality checks</button>}
+    {canPublish && <button type="button" className={styles.primaryButton} disabled={disabled} onClick={() => void publish()}>{disabled ? "Publishing…" : `Publish to ${publishTarget}`}</button>}
+    {articleStatus && ["approved", "scheduled", "published"].includes(articleStatus)
+      ? <span className={styles.approvalStatus}>{published ? "Published" : articleStatus === "scheduled" ? "Approved · Scheduled" : "This version is approved"}</span>
+      : null}
+    <div className={styles.decisionRow}>
+      {!articleStatus || !["approved", "scheduled", "published"].includes(articleStatus) ? <button type="button" className={styles.primaryButton} disabled={!canApprove || disabled}
+        aria-describedby={!canApprove ? reviewHelpId : undefined} onClick={() => void submit("approve")}
+        title={canApprove ? "Approve this version" : approveDisabledReason ?? "Run quality checks before approval"}>{disabled ? "Working…" : "Approve article"}</button> : null}
+      <button type="button" className={styles.rejectButton} disabled={!canRequestChanges || disabled}
+        aria-describedby={!canRequestChanges ? reviewHelpId : undefined} onClick={() => void submit("request_changes")}
+        title={canRequestChanges ? "Return this draft for changes" : requestChangesDisabledReason}>Request changes</button>
+    </div>
+    {canRunQa && canApprove && <button type="button" className={styles.button} disabled={disabled} onClick={() => void runQa()}>Run checks again</button>}
+    <details className={styles.reviewNote}>
+      <summary>Add a review note</summary>
+      <label htmlFor="approval-note">Your note</label>
+      <textarea id="approval-note" value={note} maxLength={2000} rows={3} disabled={disabled}
+        onChange={event => setNote(event.target.value)} placeholder="What should change, or why are you approving?" />
+      <p>Included with your decision, or save it as a note.</p>
+      <button type="button" className={styles.button} disabled={disabled || !note.trim()} onClick={() => void submit("note")}>Save note</button>
+    </details>
+    {error && <div role="alert" className={styles.actionError}>{error.message}{error.detail && <div>{error.detail}</div>}</div>}
+    {qaNotice && !error && <div role="status" className={styles.actionNotice}>{qaNotice}</div>}
+  </div>;
   return (
     <div>
+      {disabled && <p className="small muted"><LoadingIndicator label="Updating article…" /></p>}
       {/*
         * The note is always available, not only when a decision can be made.
         *
@@ -236,6 +293,7 @@ export function ApprovalActions({
           {error.detail ? <div className="small mono">{error.detail}</div> : null}
         </div>
       ) : null}
+      {qaNotice && !error ? <p role="status" className="small muted">{qaNotice}</p> : null}
     </div>
   );
 }

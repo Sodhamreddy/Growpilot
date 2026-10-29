@@ -15,6 +15,14 @@ const term = (id: string, t: string, relevance: number | null) => ({
 });
 
 describe("buildContentPlan — ranking without market data", () => {
+  it("plans unused keywords below the first twelve results", () => {
+    const input: ClusterInput[] = Array.from({ length: 15 }, (_, i) => ({
+      id: `c${i}`, label: `term ${i}`, intent: "commercial",
+      terms: [{ id: `k${i}`, term: `term ${i}`, opportunityScore: 100 - i, volume: 100 }],
+    }));
+    const plan = buildContentPlan(input, { limit: 12, excludedKeywordIds: new Set(Array.from({ length: 12 }, (_, i) => `k${i}`)) });
+    expect(plan.map(p => p.primaryKeywordId)).toEqual(["k12", "k13", "k14"]);
+  });
   const clusters: ClusterInput[] = [
     {
       id: "c1", label: "printer driver update", intent: "transactional",
@@ -132,5 +140,15 @@ describe("topic titles", () => {
     );
     const question = plan.find((t) => t.primaryKeywordId === "q");
     expect(question?.title).toBe("How does SEO work?");
+  });
+});
+
+describe("observed search performance", () => {
+  it("boosts observed opportunities modestly without inventing demand", async () => {
+    const { searchPerformanceBoost } = await import("./plan.js");
+    expect(searchPerformanceBoost(0, 0)).toBe(0);
+    expect(searchPerformanceBoost(99, 0)).toBe(0);
+    expect(searchPerformanceBoost(1000, 0)).toBeGreaterThan(searchPerformanceBoost(1000, 500));
+    expect(searchPerformanceBoost(100000000, 0)).toBeLessThanOrEqual(10);
   });
 });

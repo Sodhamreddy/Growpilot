@@ -1,6 +1,6 @@
 import { eq, and } from "drizzle-orm";
 import { keywords, keywordClusters, repo } from "@ob/db";
-import { generateSeedKeywords, clusterKeywords, opportunityScore, StubKeywordProvider, type KeywordDataProvider } from "@ob/blog";
+import { generateSeedKeywords, clusterKeywords, opportunityScore, configuredKeywordProvider, type KeywordDataProvider } from "@ob/blog";
 import { JOBS, payloadFrom } from "@ob/jobs";
 import type { WorkerContext } from "../../context.js";
 import { contextFromPayload } from "../../context.js";
@@ -22,7 +22,7 @@ export interface ResearchPayload {
   location?: string;
 }
 
-let provider: KeywordDataProvider = new StubKeywordProvider();
+let provider: KeywordDataProvider | undefined;
 
 /** Swap in a real provider (SE Ranking, DataForSEO, …) at startup. */
 export function setKeywordProvider(next: KeywordDataProvider): void {
@@ -53,7 +53,8 @@ export async function processResearchKeywords(
   }
 
   // Enrich with provider metrics. Missing data stays null.
-  const metrics = await provider.metrics(seeds.map((s) => s.term), {
+  const activeProvider = provider ?? configuredKeywordProvider();
+  const metrics = await activeProvider.metrics(seeds.map((s) => s.term), {
     ...(payload.location ? { location: payload.location } : {}),
   });
   const metricByTerm = new Map(metrics.map((m) => [m.term, m]));
@@ -129,7 +130,7 @@ export async function processResearchKeywords(
           location,
           clusterId: clusterIdByTerm.get(k.term) ?? null,
           opportunityScore: k.opportunityScore,
-          provider: provider.name,
+          provider: activeProvider.name,
           refreshedAt: new Date(),
         })
         .onConflictDoUpdate({
@@ -142,7 +143,7 @@ export async function processResearchKeywords(
             relevance: k.relevance,
             clusterId: clusterIdByTerm.get(k.term) ?? null,
             opportunityScore: k.opportunityScore,
-            provider: provider.name,
+            provider: activeProvider.name,
             refreshedAt: new Date(),
           },
         });
@@ -153,7 +154,7 @@ export async function processResearchKeywords(
     action: "keywords.researched",
     entityType: "business",
     entityId: payload.businessId,
-    after: { keywords: enriched.length, clusters: clusters.length, provider: provider.name },
+    after: { keywords: enriched.length, clusters: clusters.length, provider: activeProvider.name },
   });
 
   // Research on its own leaves the customer with a keyword list and no plan.

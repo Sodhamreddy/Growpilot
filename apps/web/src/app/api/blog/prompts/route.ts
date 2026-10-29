@@ -54,6 +54,7 @@ export const GET = route(async (ctx) => {
 });
 
 const schema = z.object({
+  businessId: z.string().uuid(),
   topics: z.string().max(LIMITS.topics).optional(),
   article: z.string().max(LIMITS.article).optional(),
   reference: z.string().max(LIMITS.reference).optional(),
@@ -72,7 +73,7 @@ export const PATCH = route(async (ctx, req) => {
    * same trade. Storing these per workspace meant a pharmacy's instructions
    * were being applied to a marketing agency's articles.
    */
-  const business = await repo.getPrimaryBusiness(database, ctx);
+  const business = await repo.getBusiness(database, ctx, body.businessId);
   if (!business) {
     throw new AppError("validation_failed", "Select a client before saving instructions.", {
       retryable: false,

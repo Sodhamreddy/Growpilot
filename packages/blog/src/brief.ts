@@ -53,6 +53,9 @@ export interface GenerateBriefInput {
   intent: string;
   /** Existing site pages this article should link to (spec §6.3 "internal links"). */
   internalLinkCandidates: { url: string; title: string }[];
+  /** Editorial direction supplied by the user, never treated as source evidence. */
+  instructions?: string;
+  previousBrief?: ContentBrief;
 }
 
 export async function generateBrief(
@@ -79,6 +82,10 @@ Rules:
       `Primary keyword: ${input.primaryKeyword}`,
       input.secondaryKeywords.length ? `Secondary terms: ${input.secondaryKeywords.join(", ")}` : "",
       `Search intent: ${input.intent}`,
+      input.previousBrief ? `Previous brief to refine (keep useful parts):\n${JSON.stringify(input.previousBrief)}` : "",
+      input.instructions?.trim()
+        ? `User's editorial direction:\n${input.instructions.trim()}\nTreat this as writing guidance, not proof of business claims. Keep facts grounded in the supplied evidence.`
+        : "",
       "",
       input.internalLinkCandidates.length
         ? `Existing pages available to link to:\n${input.internalLinkCandidates

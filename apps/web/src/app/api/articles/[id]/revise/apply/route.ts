@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
-import { eq } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { AppError, requireRole } from "@ob/core";
 import { repo, articles, articleRevisions } from "@ob/db";
 import { splitSections, replaceSection } from "@ob/blog";
@@ -23,6 +23,7 @@ import { db } from "@/lib/services";
  */
 
 const schema = z.object({
+  expectedVersion: z.number().int().positive(),
   sectionId: z.string().min(1).max(8),
   content: z.string().max(100_000),
 });
@@ -56,7 +57,7 @@ export const POST = route(async (ctx, req) => {
    */
   const sections = splitSections(article.bodyMarkdown);
   const target = sections.find((s) => s.id === body.sectionId);
-  if (!target) {
+  if (!target || body.expectedVersion !== article.version) {
     throw new AppError(
       "conflict",
       "The draft changed while you were reviewing. Ask again to see a fresh version.",
@@ -73,6 +74,15 @@ export const POST = route(async (ctx, req) => {
   const wordCount = (nextBody.match(/[\p{L}\p{N}'’-]+/gu) ?? []).length;
 
   await database.transaction(async (tx) => {
+    const [current] = await tx.select({ version: articles.version, status: articles.status }).from(articles)
+      .where(and(eq(articles.workspaceId, ctx.workspaceId), eq(articles.id, article.id))).for("update");
+    if (!current || current.version !== article.version || current.status !== article.status) {
+      throw new AppError("conflict", "The draft changed while applying. Refresh and ask for a fresh revision.", { retryable: false });
+    }
+    await tx.insert(articleRevisions).values({
+      workspaceId: ctx.workspaceId, articleId: article.id, version: article.version,
+      title: article.title, bodyMarkdown: article.bodyMarkdown, authoredBy: "unknown",
+    }).onConflictDoNothing({ target: [articleRevisions.articleId, articleRevisions.version] });
     await tx.insert(articleRevisions).values({
       workspaceId: ctx.workspaceId,
       articleId: article.id,
@@ -84,7 +94,7 @@ export const POST = route(async (ctx, req) => {
       authoredBy: "human",
     });
 
-    await tx
+    const [saved] = await tx
       .update(articles)
       .set({
         bodyMarkdown: nextBody,
@@ -92,9 +102,14 @@ export const POST = route(async (ctx, req) => {
         wordCount,
         seoScore: null,
         voiceScore: null,
+        approvedAt: null,
+        approvedBy: null,
+        status: article.status === "qa" || article.status === "awaiting_approval" ? "needs_changes" : article.status,
         updatedAt: new Date(),
       })
-      .where(eq(articles.id, article.id));
+      .where(and(eq(articles.id, article.id), eq(articles.workspaceId, ctx.workspaceId),
+        eq(articles.version, article.version), eq(articles.status, article.status))).returning({ id: articles.id });
+    if (!saved) throw new AppError("conflict", "The draft changed while applying. Refresh and ask for a fresh revision.", { retryable: false });
   });
 
   await repo.writeAudit(database, ctx, {

@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { LoadingIndicator } from "./LoadingIndicator";
 
 /**
  * The blog companion.
@@ -25,6 +26,7 @@ export interface CompanionSection {
 }
 
 interface Proposal {
+  expectedVersion: number;
   sectionId: string;
   heading: string;
   before: string;
@@ -41,16 +43,23 @@ const EXAMPLES = [
 
 export function BlogCompanion({
   articleId,
+  version,
   sections,
   canEdit,
   editable,
+  embedded = false,
+  onApplyingChange,
 }: {
   articleId: string;
+  version: number;
   sections: CompanionSection[];
   canEdit: boolean;
   editable: boolean;
+  embedded?: boolean;
+  onApplyingChange?: (applying: boolean) => void;
 }) {
   const router = useRouter();
+  const [refreshing, startRefresh] = useTransition();
   const [sectionId, setSectionId] = useState(sections[0]?.id ?? "");
   const [instruction, setInstruction] = useState("");
   const [busy, setBusy] = useState(false);
@@ -60,6 +69,8 @@ export function BlogCompanion({
   const [done, setDone] = useState<string | null>(null);
 
   const usable = canEdit && editable && sections.length > 0;
+  useEffect(() => { onApplyingChange?.(applying || refreshing); }, [applying, refreshing, onApplyingChange]);
+  useEffect(() => () => onApplyingChange?.(false), [onApplyingChange]);
 
   async function ask() {
     setBusy(true);
@@ -70,7 +81,7 @@ export function BlogCompanion({
       const res = await fetch(`/api/articles/${articleId}/revise`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sectionId, instruction: instruction.trim() }),
+        body: JSON.stringify({ sectionId, instruction: instruction.trim(), expectedVersion: version }),
       });
       const body: unknown = await res.json();
       if (!res.ok) {
@@ -95,7 +106,7 @@ export function BlogCompanion({
       const res = await fetch(`/api/articles/${articleId}/revise/apply`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sectionId: proposal.sectionId, content: proposal.after }),
+        body: JSON.stringify({ sectionId: proposal.sectionId, content: proposal.after, expectedVersion: proposal.expectedVersion }),
       });
       const body: unknown = await res.json();
       if (!res.ok) {
@@ -107,7 +118,7 @@ export function BlogCompanion({
       setProposal(null);
       setInstruction("");
       setDone("Applied. The draft is now at a new version.");
-      router.refresh();
+      startRefresh(() => router.refresh());
     } catch {
       setError("Could not reach the server.");
     } finally {
@@ -116,7 +127,7 @@ export function BlogCompanion({
   }
 
   return (
-    <div className="card" style={{ position: "sticky", top: 16 }}>
+    <div className="card" style={{ position: embedded ? "static" : "sticky", top: embedded ? undefined : 16 }}>
       <div style={{ marginBottom: 14 }}>
         <strong>Ask for a change</strong>
         <p className="small muted" style={{ margin: "4px 0 0" }}>
@@ -124,6 +135,8 @@ export function BlogCompanion({
           before it goes in.
         </p>
       </div>
+
+      {refreshing && <p className="small muted"><LoadingIndicator label="Loading updated article…" /></p>}
 
       {!usable ? (
         <p className="small muted" style={{ margin: 0 }}>
@@ -173,7 +186,7 @@ export function BlogCompanion({
           <button type="button" className="btn primary"
                   disabled={busy || applying || instruction.trim().length < 3}
                   onClick={() => void ask()}>
-            {busy ? "Thinking…" : "Show me the change"}
+            {busy ? <LoadingIndicator label="Preparing your change…" /> : "Show me the change"}
           </button>
 
           {proposal ? (
@@ -215,7 +228,7 @@ export function BlogCompanion({
                 <button type="button" className="btn primary"
                         disabled={applying || !proposal.changed}
                         onClick={() => void apply()}>
-                  {applying ? "Applying…" : "Apply"}
+                  {applying ? <LoadingIndicator label="Applying…" /> : "Apply"}
                 </button>
                 <button type="button" className="btn" disabled={applying}
                         onClick={() => setProposal(null)}>

@@ -1,8 +1,9 @@
 export const dynamic = "force-dynamic";
 
-import { requireRole } from "@ob/core";
+import { AppError, requireRole } from "@ob/core";
 import { repo } from "@ob/db";
-import { JOBS, payloadFrom } from "@ob/jobs";
+import { JOBS, payloadFrom, QueueRegistry } from "@ob/jobs";
+import { assertTransition } from "@ob/pipeline";
 import { route } from "@/lib/api";
 import { db, getQueues } from "@/lib/services";
 
@@ -16,12 +17,26 @@ export const POST = route(
     requireRole(ctx, "editor");
     const id = articleIdFrom(req);
     const article = await repo.getArticle(db(), ctx, id);
+    if (!["draft", "qa", "needs_changes", "awaiting_approval"].includes(article.status)) {
+      throw new AppError("conflict", "QA is available for editable drafts. Wait for generation or request changes first.", { retryable: false });
+    }
+    if (article.status !== "qa") assertTransition(article.status, "qa");
 
-    const jobId = await getQueues().enqueue(
+    const queues = getQueues();
+    const key = `qa:${id}:v${article.version}`;
+    const existing = await queues.get("qa").getJob(QueueRegistry.jobIdFor(key));
+    if (existing) {
+      const state = await existing.getState();
+      // Explicit reruns must not be swallowed by the retained job history.
+      // Waiting/active jobs keep their identity so repeated clicks do not duplicate work.
+      if (state === "failed" || state === "completed") await existing.retry(state);
+      return { ok: true, jobId: existing.id };
+    }
+    const jobId = await queues.enqueue(
       "qa",
       JOBS.runQualityGates,
-      payloadFrom(ctx, { articleId: id }),
-      { idempotencyKey: `qa:${id}:v${article.version}` },
+      payloadFrom(ctx, { articleId: id, articleVersion: article.version }),
+      { idempotencyKey: key },
     );
 
     return { ok: true, jobId };

@@ -1,97 +1,56 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
 import { IconEdit, IconSpark } from "./Icons";
 import { BlogPromptSettings, type BlogPrompts } from "./BlogPromptSettings";
 import { TopicSuggester } from "./TopicSuggester";
-
-/**
- * The two things you do on this page, beside the title.
- *
- * Both used to be full-width cards carrying a paragraph each, stacked above
- * the article list. That gave two one-click actions the same visual weight as
- * the work itself, and pushed the articles below the fold — the page looked
- * busy while offering very little.
- *
- * As header buttons they stay findable and stop competing. The explanation
- * moves inside: instructions open a panel, suggestions render only once there
- * are topics to look at.
- */
+import styles from "./BlogQueue.module.css";
 
 export function BlogHeaderActions({
   businessId,
+  businessName = "",
   canEdit,
   blockedReason,
   prompts,
 }: {
   businessId: string | null;
+  businessName?: string;
   canEdit: boolean;
   blockedReason: string | null;
   prompts: BlogPrompts;
 }) {
   const [showInstructions, setShowInstructions] = useState(false);
-  /*
-   * A counter, not a boolean.
-   *
-   * Bumping it remounts the suggester, which is what makes "Suggest again"
-   * from the header actually re-run rather than toggling a panel that is
-   * already open.
-   */
-  const [runId, setRunId] = useState(0);
-  const [asked, setAsked] = useState(false);
+  const [instructionsOpened, setInstructionsOpened] = useState(false);
+  const [showTopics, setShowTopics] = useState(false);
+  const [topicsOpened, setTopicsOpened] = useState(false);
+  const topicsId = useId();
+  const instructionsId = useId();
+  const topicsRef = useRef<HTMLElement>(null);
 
   const configured = [prompts.topics, prompts.article, prompts.reference]
     .filter((s) => s.trim()).length;
 
+  function createBlog() {
+    setTopicsOpened(true); setShowTopics(true); setShowInstructions(false);
+    requestAnimationFrame(() => topicsRef.current?.scrollIntoView({ block: "start", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" }));
+  }
+
   return (
     <>
-      <div className="headeractions">
-        <button
-          type="button"
-          className={`actionbtn${showInstructions ? " on" : ""}`}
-          aria-expanded={showInstructions}
-          aria-label="Writing instructions"
-          onClick={() => setShowInstructions((v) => !v)}
-        >
-          <span className="actionbtn-icon" aria-hidden><IconEdit size={15} /></span>
-          <span style={{ whiteSpace: "nowrap", fontSize: 13 }}>Writing instructions</span>
-          {configured ? (
-            <span className="dot" title={`${configured} of 3 set`} aria-hidden />
-          ) : null}
-        </button>
-
-        {businessId && canEdit ? (
-          <button
-            type="button"
-            /*
-             * Styled inline rather than through `.actionbtn.primary`.
-             *
-             * The class version rendered as an empty outlined box on the
-             * user's machine — green border, white fill, invisible white
-             * label — while the source, the compiled chunk and the served
-             * stylesheet all read correctly. Rather than keep guessing at
-             * which layer dropped the rule, the two declarations that make
-             * this button legible are stated on the element, where nothing
-             * in the cascade can reach them.
-             */
-            className="actionbtn"
-            style={{
-              background: "var(--accent)",
-              borderColor: "var(--accent)",
-              color: "#fff",
-            }}
-            disabled={Boolean(blockedReason)}
-            title={blockedReason ?? undefined}
-            aria-label={asked ? "Suggest again" : "Suggest topics"}
-            onClick={() => { setAsked(true); setRunId((n) => n + 1); }}
-          >
-            <span className="actionbtn-icon" aria-hidden><IconSpark size={15} /></span>
-            <span style={{ whiteSpace: "nowrap", fontSize: 13, color: "#fff" }}>
-              {asked ? "Suggest again" : "Suggest topics"}
-            </span>
+      <header className={styles.header}>
+        <div className={styles.headingCopy}><h1>Blog</h1><p>{businessName ? `${businessName} · ` : ""}Create content, review drafts and publish when ready.</p></div>
+        <div className={styles.actions}>
+          <button type="button" className={styles.button} aria-expanded={showInstructions} aria-controls={instructionsId}
+            disabled={!businessId} title={!businessId ? "Add a business profile to set writing instructions." : undefined}
+            onClick={() => { setInstructionsOpened(true); setShowInstructions(value => !value); setShowTopics(false); }}>
+            <IconEdit size={15} /><span>Writing instructions</span>{configured ? <span className={styles.configuredDot} title={`${configured} of 3 instructions set`} aria-hidden /> : null}
           </button>
-        ) : null}
-      </div>
+          {canEdit && <button type="button" className={`${styles.button} ${styles.primary}`} disabled={!businessId || Boolean(blockedReason)}
+            title={blockedReason ?? "Start with topic ideas from your business profile"} aria-expanded={showTopics} aria-controls={topicsId} onClick={createBlog}>
+            <IconSpark size={16} /> Create blog
+          </button>}
+        </div>
+      </header>
 
       {/*
         * Why the reason sits here rather than only on the button.
@@ -101,28 +60,25 @@ export function BlogHeaderActions({
         * to reveal it at all.
         */}
       {blockedReason ? (
-        <p className="small" style={{ color: "var(--warn)", margin: "10px 0 0" }}>
+        <p className={styles.notice}>
           {blockedReason}
         </p>
       ) : null}
 
-      {showInstructions ? (
-        <div style={{ marginTop: 18 }}>
-          <BlogPromptSettings canEdit={canEdit} initial={prompts} startOpen />
-        </div>
+      {instructionsOpened && businessId ? (
+        <section className={styles.panel} id={instructionsId} hidden={!showInstructions} aria-label="Writing instructions">
+          <div className={styles.panelHeader}><div><h2>Writing instructions</h2><p>Set the voice and direction for future articles.</p></div>
+            <button type="button" className={styles.closeButton} aria-label="Close writing instructions" onClick={() => setShowInstructions(false)}>×</button></div>
+          <BlogPromptSettings businessId={businessId} canEdit={canEdit} initial={prompts} startOpen />
+        </section>
       ) : null}
 
-      {businessId && asked ? (
-        <div style={{ marginTop: 18 }}>
-          <TopicSuggester
-            key={runId}
-            businessId={businessId}
-            canEdit={canEdit}
-            blockedReason={blockedReason}
-            compact
-            autoRun
-          />
-        </div>
+      {businessId && topicsOpened ? (
+        <section className={`${styles.panel} ${styles.creationPanel}`} id={topicsId} hidden={!showTopics} ref={topicsRef} aria-label="Create a blog">
+          <div className={styles.panelHeader}><div><h2>Choose a topic to get started</h2><p>Review its brief before generating a draft. AI suggestions use your workspace budget.</p></div>
+            <button type="button" className={styles.closeButton} aria-label="Close topic suggestions" onClick={() => setShowTopics(false)}>×</button></div>
+          <TopicSuggester businessId={businessId} canEdit={canEdit} blockedReason={blockedReason} compact autoRun />
+        </section>
       ) : null}
     </>
   );
