@@ -1,36 +1,29 @@
 export const dynamic = "force-dynamic";
 
-import { AppError, config, requireRole } from "@ob/core";
+import { AppError, requireRole } from "@ob/core";
 import { repo } from "@ob/db";
-import { GoogleApiError, googleCredentials, syncReviews } from "@ob/gmb";
+import { JOBS } from "@ob/jobs";
 import { route } from "@/lib/api";
-import { db } from "@/lib/services";
-import { queueReplyDrafts } from "@/lib/reviews";
+import { db, getQueues } from "@/lib/services";
+import { queueReviewSync } from "@/lib/reviews";
 
-/**
- * POST /api/reviews/sync — read the current client's reviews now.
- *
- * The worker does this every six hours on its own; this is the button for
- * when someone has just had a review and wants to answer it.
- */
-export const POST = route(
-  async (ctx) => {
-    requireRole(ctx, "editor");
-    const database = db();
-    const business = await repo.getPrimaryBusiness(database, ctx);
-    if (!business) throw new AppError("validation_failed", "Select a client first.", { retryable: false });
-    if (!business.googleListing) throw new AppError("validation_failed", "Choose this client's Google listing first.", { retryable: false });
+export const POST = route(async (ctx) => {
+  requireRole(ctx, "editor");
+  const business = await repo.getPrimaryBusiness(db(), ctx);
+  if (!business?.googleListing) throw new AppError("validation_failed", "Select a client and choose its Google listing first.", { retryable: false });
+  return { ok: true, queued: true, jobId: await queueReviewSync(ctx, business.id) };
+}, { rateLimit: { limit: 30, windowSeconds: 3600 } });
 
-    let result;
-    try {
-      result = await syncReviews(database, ctx, { id: business.id, googleListing: business.googleListing }, googleCredentials(config()), { force: true });
-    } catch (err) {
-      if (err instanceof GoogleApiError) throw new AppError("provider_error", err.message, { retryable: !err.permanent });
-      throw err;
-    }
-    const drafting = result.source ? await queueReplyDrafts(ctx, business.id) : false;
-    return { ok: true, source: result.source, added: result.added.length, listing: result.listing, drafting };
-  },
-  // Each sync is a paid Google call.
-  { rateLimit: { limit: 30, windowSeconds: 3600 } },
-);
+export const GET = route(async (ctx, req) => {
+  const id = new URL(req.url).searchParams.get("jobId");
+  if (!id || id.length > 200) throw new AppError("validation_failed", "Choose a review sync job.", { retryable: false });
+  const job = await getQueues().get("analytics").getJob(id);
+  if (!job || job.name !== JOBS.syncReviews || job.data.workspaceId !== ctx.workspaceId) {
+    throw new AppError("not_found", "That review sync is not in this workspace.", { retryable: false });
+  }
+  const business = await repo.getPrimaryBusiness(db(), ctx);
+  if (job.data.businessId !== business?.id) throw new AppError("not_found", "That review sync belongs to another client.", { retryable: false });
+  const state = await job.getState();
+  return { state, result: state === "completed" ? job.returnvalue : null,
+    error: state === "failed" ? "Review sync failed. Check the listing connection and try Sync now again." : null };
+});

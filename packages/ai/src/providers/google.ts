@@ -135,7 +135,7 @@ export class GoogleProvider implements AiProvider {
     };
   }
 
-  async embed(req: EmbedRequest, model: string): Promise<EmbedResponse> {
+  async embed(req: EmbedRequest, model: string, signal: AbortSignal): Promise<EmbedResponse> {
     const client = this.#getClient();
     try {
       // The knowledge_chunks.embedding column is vector(1536), so the
@@ -145,7 +145,7 @@ export class GoogleProvider implements AiProvider {
       const res = await client.models.embedContent({
         model,
         contents: req.texts.map((t) => ({ parts: [{ text: t }] })),
-        config: { outputDimensionality: EMBEDDING_DIMENSIONS },
+        config: { outputDimensionality: EMBEDDING_DIMENSIONS, abortSignal: signal },
       });
       const vectors = (res.embeddings ?? []).map((e) => e.values ?? []);
       if (vectors.length !== req.texts.length) {

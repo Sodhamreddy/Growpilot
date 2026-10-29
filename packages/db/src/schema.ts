@@ -1,6 +1,6 @@
 import {
   pgTable, pgEnum, text, uuid, timestamp, integer, real, boolean,
-  jsonb, index, uniqueIndex, primaryKey, vector, bigint,
+  jsonb, index, uniqueIndex, primaryKey, vector, bigint, type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 
@@ -153,6 +153,7 @@ export const workspaces = pgTable("workspaces", {
 export const workspaceMembers = pgTable("workspace_members", {
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
   userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  selectedBusinessId: uuid("selected_business_id").references((): AnyPgColumn => businesses.id, { onDelete: "set null" }),
   role: memberRole("role").notNull().default("editor"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
@@ -649,6 +650,7 @@ export const articleScores = pgTable("article_scores", {
 export const integrations = pgTable("integrations", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  scopeKey: text("scope_key").notNull().default("workspace"),
   provider: text("provider").notNull(),
   status: integrationStatus("status").notNull().default("connected"),
   externalAccountId: text("external_account_id"),
@@ -660,11 +662,14 @@ export const integrations = pgTable("integrations", {
   consecutiveFailures: integer("consecutive_failures").notNull().default(0),
   lastError: text("last_error"),
   connectedAt: timestamp("connected_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [uniqueIndex("integration_ws_provider_uq").on(t.workspaceId, t.provider)]);
+}, (t) => [uniqueIndex("integration_ws_provider_uq").on(t.workspaceId, t.provider, t.scopeKey)]);
 
 export const publishJobs = pgTable("publish_jobs", {
   id: uuid("id").primaryKey().defaultRandom(),
   workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  integrationId: uuid("integration_id").references(() => integrations.id, { onDelete: "set null" }),
+  articleVersion: integer("article_version"),
+  targetFingerprint: text("target_fingerprint"),
   provider: text("provider").notNull(),
   entityType: text("entity_type").notNull(),
   entityId: uuid("entity_id").notNull(),
@@ -816,6 +821,9 @@ export type SocialNetworkId = "facebook" | "instagram";
  * photo to a Page twice is the one failure worse than not posting.
  */
 export interface PackSchedule {
+  /** Bound destination; old schedules must be reviewed and rescheduled. */
+  pageId?: string;
+  instagramId?: string;
   /** ISO time it publishes. */
   at: string;
   networks: SocialNetworkId[];
@@ -984,7 +992,7 @@ export const socialTopicsRelations = relations(socialTopics, ({ one }) => ({
  * replies post from here), Places API (latest five), the listing's public Maps
  * page (read by a browser, used only when neither API is available).
  */
-export type ReviewSource = "gbp" | "places" | "maps";
+export type ReviewSource = "gbp" | "places" | "maps" | "manual";
 
 export interface GoogleListing {
   /** Google Places id: the public listing, readable with an API key. */
@@ -1068,3 +1076,11 @@ export const gmbReviews = pgTable("gmb_reviews", {
   uniqueIndex("gmb_review_ext_uq").on(t.businessId, t.source, t.externalId),
   index("gmb_review_biz_idx").on(t.workspaceId, t.businessId, t.publishedAt),
 ]);
+
+/** In-flight AI spend, reserved under the workspace lock before contacting a provider. */
+export const aiReservations = pgTable("ai_reservations", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  costMicros: bigint("cost_micros", { mode: "number" }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("ai_reservation_workspace_idx").on(t.workspaceId, t.createdAt)]);

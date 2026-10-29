@@ -21,6 +21,8 @@ export interface NetworkReadiness {
 
 export interface ConnectionSummary {
   connected: boolean;
+  pageId?: string;
+  instagramId?: string;
   pageName: string | null;
   hasPage: boolean;
   instagramLinked: boolean;
@@ -64,6 +66,8 @@ export async function loadConnection(
   const page = pages.find((p) => p.id === business.metaPageId) ?? null;
   const base = {
     connected: true,
+    ...(page ? { pageId: page.id } : {}),
+    ...(page?.instagramId ? { instagramId: page.instagramId } : {}),
     pageName: page?.name ?? null,
     hasPage: Boolean(page),
     instagramLinked: Boolean(page?.instagramId),

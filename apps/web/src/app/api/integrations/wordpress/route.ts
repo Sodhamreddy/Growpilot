@@ -22,6 +22,7 @@ import { db } from "@/lib/services";
  */
 
 const connectSchema = z.object({
+  businessId: z.string().uuid(),
   /** Site root, e.g. https://example.com */
   baseUrl: z.string().url("Enter the full site address, including https://"),
   username: z.string().min(1, "Enter the WordPress username."),
@@ -36,6 +37,7 @@ export const POST = route(async (ctx, req) => {
 
   const body = await parseBody(req, connectSchema);
   const database = db();
+  await repo.getBusiness(database, ctx, body.businessId);
 
   const credential: WordPressCredential = {
     baseUrl: body.baseUrl.trim(),
@@ -64,6 +66,7 @@ export const POST = route(async (ctx, req) => {
     .values({
       workspaceId: ctx.workspaceId,
       provider: "wordpress",
+      scopeKey: body.businessId,
       status: "connected",
       externalAccountId: String(identity.userId),
       displayName: identity.displayName + " · " + new URL(credential.baseUrl).host,
@@ -74,7 +77,7 @@ export const POST = route(async (ctx, req) => {
       connectedAt: new Date(),
     })
     .onConflictDoUpdate({
-      target: [integrations.workspaceId, integrations.provider],
+      target: [integrations.workspaceId, integrations.provider, integrations.scopeKey],
       set: {
         status: "connected",
         externalAccountId: String(identity.userId),
@@ -102,7 +105,8 @@ export const POST = route(async (ctx, req) => {
   };
 });
 
-export const DELETE = route(async (ctx) => {
+export const DELETE = route(async (ctx, req) => {
+  const body = await parseBody(req, z.object({ businessId: z.string().uuid() }));
   requireRole(ctx, "admin");
   const database = db();
 
@@ -111,6 +115,7 @@ export const DELETE = route(async (ctx) => {
     .where(and(
       eq(integrations.workspaceId, ctx.workspaceId),
       eq(integrations.provider, "wordpress"),
+      eq(integrations.scopeKey, body.businessId),
     ));
 
   await repo.writeAudit(database, ctx, {

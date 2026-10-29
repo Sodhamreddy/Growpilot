@@ -147,10 +147,9 @@ const DUMMY_HASH = hashPassword("dummy-password-for-timing-equalisation");
  * `email` completely, so handing it an unverified value would let anyone claim
  * any address.
  *
- * Linking is by normalised email. Someone who signed up with a password and
- * later uses Google with the same address gets their existing account, not a
- * duplicate: two accounts for one person is worse than either outcome of the
- * linking decision, and Google has verified the address as well as we could.
+ * An email signup does not prove ownership of the address. Never silently link
+ * it to Google: the original password and sessions could belong to someone
+ * who pre-registered another person's address.
  */
 export async function signInWithGoogle(input: {
   email: string;
@@ -166,13 +165,14 @@ export async function signInWithGoogle(input: {
   const database = db();
 
   const [existing] = await database
-    .select({ id: users.id, status: users.status })
+    .select({ id: users.id, status: users.status, authProvider: users.authProvider })
     .from(users)
     .where(eq(users.emailNormalized, emailNormalized))
     .limit(1);
 
   if (existing) {
     if (existing.status !== "active") throw forbidden("That account is not active.");
+    if (existing.authProvider !== "google") throw new GoogleAccountLinkRequired();
 
     const [membership] = await database
       .select({ workspaceId: workspaceMembers.workspaceId })
@@ -232,6 +232,13 @@ export async function signInWithGoogle(input: {
   });
 
   return { ...created, created: true };
+}
+
+export class GoogleAccountLinkRequired extends Error {
+  constructor() {
+    super("Use email sign-in for this account. Google accounts are not automatically linked to email accounts.");
+    this.name = "GoogleAccountLinkRequired";
+  }
 }
 
 // ─── Password reset ─────────────────────────────────────────────────────────
@@ -301,31 +308,16 @@ export async function completePasswordReset(
 ): Promise<{ userId: string }> {
   const database = db();
 
-  const [row] = await database
-    .select()
-    .from(passwordResets)
-    .where(eq(passwordResets.tokenHash, hashToken(token)))
-    .limit(1);
-
-  if (!row) throw unauthorized("That reset link is not valid. Request a new one.");
-  if (row.usedAt) throw unauthorized("That reset link has already been used. Request a new one.");
-  if (row.expiresAt < new Date()) {
-    throw unauthorized("That reset link has expired. Request a new one.");
-  }
-
-  await database.transaction(async (tx) => {
-    await tx
-      .update(users)
-      .set({ passwordHash: await hashPasswordAsync(newPassword), updatedAt: new Date() })
-      .where(eq(users.id, row.userId));
-
-    await tx.update(passwordResets).set({ usedAt: new Date() }).where(eq(passwordResets.id, row.id));
-
-    // Sign out everywhere.
-    await tx.delete(sessions).where(eq(sessions.userId, row.userId));
+  const passwordHash = await hashPasswordAsync(newPassword);
+  return database.transaction(async (tx) => {
+    const [claimed] = await tx.update(passwordResets).set({ usedAt: new Date() })
+      .where(and(eq(passwordResets.tokenHash, hashToken(token)), isNull(passwordResets.usedAt), gt(passwordResets.expiresAt, new Date())))
+      .returning({ userId: passwordResets.userId });
+    if (!claimed) throw unauthorized("That reset link is expired or already used. Request a new one.");
+    await tx.update(users).set({ passwordHash, updatedAt: new Date() }).where(eq(users.id, claimed.userId));
+    await tx.delete(sessions).where(eq(sessions.userId, claimed.userId));
+    return { userId: claimed.userId };
   });
-
-  return { userId: row.userId };
 }
 
 /** Whether a reset token is currently usable — for rendering the form or an error. */

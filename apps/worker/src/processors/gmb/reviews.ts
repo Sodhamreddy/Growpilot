@@ -23,6 +23,7 @@ export interface ReviewsSyncPayload {
   businessId: string;
   /** The web app has just synced; only draft replies. */
   draftOnly?: boolean;
+  force?: boolean;
 }
 
 /** Drafts made per sync; the rest can be drafted from the page, one click each. */
@@ -48,7 +49,7 @@ export async function processReviewsSync(wc: WorkerContext, payload: ReviewsSync
   try {
     result = payload.draftOnly
       ? { source: business.googleListing.source ?? null, added: [] }
-      : await syncReviews(wc.db, ctx, business, googleCredentials(wc.cfg));
+      : await syncReviews(wc.db, ctx, business, googleCredentials(wc.cfg), { force: payload.force ?? false });
   } catch (err) {
     if (err instanceof GoogleApiError) {
       throw new AppError("provider_error", err.message, { retryable: !err.permanent });

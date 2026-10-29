@@ -7,7 +7,7 @@ import { AppError, requireRole } from "@ob/core";
 // crawlable address looks like.
 import { canonicalizeUrl } from "@ob/seo";
 import { starterInstructions } from "@ob/pipeline";
-import { businesses, businessSources, workspaces, articles, repo } from "@ob/db";
+import { businesses, businessSources, workspaces, workspaceMembers, articles, repo } from "@ob/db";
 import { JOBS, payloadFrom } from "@ob/jobs";
 import { route, parseBody } from "@/lib/api";
 import { db, getQueues } from "@/lib/services";
@@ -83,7 +83,7 @@ export const GET = route(async (ctx) => {
 
   // As in the dashboard layout: a stored id that no longer names a client is
   // not a selection, and `??` would not catch it because it is not null.
-  const storedId = ws?.settings.onboarding?.businessId;
+  const storedId = (await repo.getPrimaryBusiness(database, ctx))?.id;
   return {
     clients: rows,
     selectedId: rows.find((r) => r.id === storedId)?.id ?? rows[0]?.id ?? null,
@@ -180,22 +180,8 @@ export const POST = route(async (ctx, req) => {
      * and leaving the dashboard on the previous one would make the new row
      * appear to have done nothing.
      */
-    const [ws] = await tx
-      .select({ settings: workspaces.settings })
-      .from(workspaces)
-      .where(eq(workspaces.id, ctx.workspaceId))
-      .limit(1);
-
-    await tx
-      .update(workspaces)
-      .set({
-        settings: {
-          ...(ws?.settings ?? {}),
-          onboarding: { ...(ws?.settings.onboarding ?? {}), businessId: business!.id },
-        },
-        updatedAt: new Date(),
-      })
-      .where(eq(workspaces.id, ctx.workspaceId));
+    await tx.update(workspaceMembers).set({ selectedBusinessId: business!.id })
+      .where(and(eq(workspaceMembers.workspaceId, ctx.workspaceId), eq(workspaceMembers.userId, ctx.userId)));
 
     return { businessId: business!.id, sourceId };
   });
@@ -257,22 +243,8 @@ export const PATCH = route(async (ctx, req) => {
   // Confirms the business belongs to this workspace before selecting it.
   await repo.getBusiness(database, ctx, body.businessId);
 
-  const [ws] = await database
-    .select({ settings: workspaces.settings })
-    .from(workspaces)
-    .where(eq(workspaces.id, ctx.workspaceId))
-    .limit(1);
-
-  await database
-    .update(workspaces)
-    .set({
-      settings: {
-        ...(ws?.settings ?? {}),
-        onboarding: { ...(ws?.settings.onboarding ?? {}), businessId: body.businessId },
-      },
-      updatedAt: new Date(),
-    })
-    .where(eq(workspaces.id, ctx.workspaceId));
+  await database.update(workspaceMembers).set({ selectedBusinessId: body.businessId })
+    .where(and(eq(workspaceMembers.workspaceId, ctx.workspaceId), eq(workspaceMembers.userId, ctx.userId)));
 
   return { ok: true, selectedId: body.businessId };
 });

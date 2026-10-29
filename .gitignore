@@ -5,6 +5,8 @@ out/
 *.tsbuildinfo
 .env
 .env.local
+.env.production
+.pnpm-store/
 .env.*.local
 coverage/
 .sites-runtime/

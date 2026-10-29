@@ -189,7 +189,6 @@ export function SocialImagePacks({
                   <span className="sipack-placeholder"><span className="spack-spin dark" aria-hidden /> {working === "upload" ? "Uploading…" : "Generating…"}</span>
                 ) : image ? (
                   // Served from our own authenticated route; next/image would need it whitelisted for nothing.
-                  // eslint-disable-next-line @next/next/no-img-element
                   <img src={urlOf(image)} alt={p.pack?.altText || p.title} />
                 ) : (
                   <span className="sipack-placeholder">{state === "waiting" ? "Copy not approved yet" : "No image yet"}</span>
@@ -341,7 +340,6 @@ function ImageDialog({
                 {working === "generate" || working === "upload" ? (
                   <span className="sipack-placeholder"><span className="spack-spin dark" aria-hidden /> {working === "upload" ? "Uploading…" : "Generating… about 15 seconds"}</span>
                 ) : image ? (
-                  // eslint-disable-next-line @next/next/no-img-element
                   <img src={urlOf(image)} alt={pack?.altText || post.title} />
                 ) : (
                   <span className="sipack-placeholder">No image yet</span>

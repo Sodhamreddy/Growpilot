@@ -1,7 +1,7 @@
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { AppError, config, requireRole } from "@ob/core";
 import { gmbReviews, repo, type ReviewReplyDraft } from "@ob/db";
 import { REPLY_CHAR_LIMIT, draftReplyFor, googleCredentials, normaliseReply, postReply } from "@ob/gmb";
@@ -52,7 +52,11 @@ export const PATCH = route(
         ...(review.draft ?? { status: "draft", requiresHumanEdit: false, withheldReason: null, createdAt: now }),
         body: normaliseReply(body.body), edited: true, updatedAt: now,
       } as ReviewReplyDraft;
-      await database.update(gmbReviews).set({ draft, updatedAt: new Date() }).where(eq(gmbReviews.id, id));
+      const saved = await database.update(gmbReviews).set({ draft, updatedAt: new Date() })
+        .where(and(eq(gmbReviews.workspaceId, ctx.workspaceId), eq(gmbReviews.id, id),
+          review.draft ? sql`${gmbReviews.draft} = ${JSON.stringify(review.draft)}::jsonb` : sql`${gmbReviews.draft} IS NULL`))
+        .returning({ id: gmbReviews.id });
+      if (!saved.length) throw new AppError("conflict", "This reply changed. Refresh before saving your edits.", { retryable: false });
       return { ok: true, draft };
     }
 

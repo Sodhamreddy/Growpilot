@@ -1,6 +1,6 @@
 import IORedis from "ioredis";
 import { config, createLogger, systemContext, type Logger, type TenantContext } from "@ob/core";
-import { getDb, repo, type Database } from "@ob/db";
+import { getDb, repo, reserveAiBudget, recordAiUsage, type Database } from "@ob/db";
 import { Gateway, buildProviders } from "@ob/ai";
 import { QueueRegistry } from "@ob/jobs";
 
@@ -47,9 +47,10 @@ export function createWorkerContext(): WorkerContext {
       AI_MOCK: cfg.AI_MOCK,
     }),
     logger,
+    reserveBudget: (workspaceId, estimate) => reserveAiBudget(db, workspaceId, estimate),
     recordJob: async (record) => {
       const { aiJobs } = await import("@ob/db");
-      await db.insert(aiJobs).values({
+      await recordAiUsage(db, {
         workspaceId: record.workspaceId,
         correlationId: record.correlationId,
         taskAlias: record.taskAlias,
@@ -65,7 +66,7 @@ export function createWorkerContext(): WorkerContext {
         attemptIndex: record.attemptIndex,
         error: record.error ?? null,
         finishedAt: new Date(),
-      });
+      }, record.reservationId);
     },
     spendThisPeriod: async (workspaceId) => {
       const start = startOfMonth();

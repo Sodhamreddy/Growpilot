@@ -140,7 +140,6 @@ export function BrandSection({
 
       {logoUrl.trim().startsWith("https://") || embeddedLogo ? (
         <div className="row" style={{ marginTop: 14, alignItems: "center", gap: 12 }}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={logoUrl.trim()}
             alt="Logo preview"
@@ -172,13 +171,13 @@ export function ServicesSection({
   initial: ServiceRow[];
 }) {
   const router = useRouter();
-  const [rows, setRows] = useState(initial);
+  const rows = initial;
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   async function add() {
-    if (!value.trim()) return;
+    if (busy || !value.trim()) return;
     setBusy(true);
     setError(null);
     const err = await send("/api/business/services", "POST", { businessId, value: value.trim() });
@@ -192,7 +191,6 @@ export function ServicesSection({
     setError(null);
     const err = await send("/api/business/services", "DELETE", { businessId, factId });
     if (err) { setError(err); return; }
-    setRows((r) => r.filter((x) => x.id !== factId));
     router.refresh();
   }
 
@@ -465,8 +463,9 @@ export function SocialSection({
 /* ────────────────────── WordPress connection ────────────────────── */
 
 export function WordPressSection({
-  canEdit, connected,
+  businessId, canEdit, connected,
 }: {
+  businessId: string;
   canEdit: boolean;
   connected: { displayName: string | null; status: string } | null;
 }) {
@@ -483,6 +482,7 @@ export function WordPressSection({
     setError(null);
     setSaved(false);
     const err = await send("/api/integrations/wordpress", "POST", {
+      businessId,
       baseUrl: baseUrl.trim(),
       username: username.trim(),
       applicationPassword,
@@ -499,7 +499,7 @@ export function WordPressSection({
 
   async function disconnect() {
     setBusy(true);
-    const err = await send("/api/integrations/wordpress", "DELETE", {});
+    const err = await send("/api/integrations/wordpress", "DELETE", { businessId });
     setBusy(false);
     if (err) setError(err);
     else router.refresh();

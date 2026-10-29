@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 
 import maps
+from network import protect_context, deny_proxy
 
 # ── Configuration ───────────────────────────────────────────────────────────
 
@@ -54,6 +55,8 @@ async def lifespan(_: FastAPI):
     _crawler = AsyncWebCrawler(
         config=BrowserConfig(
             headless=True,
+            proxy_config={"server": await deny_proxy()},
+            extra_args=["--proxy-bypass-list=<-loopback>", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
             verbose=False,
             # Identify honestly. The bot name and contact stay on the end so an
             # operator reading their access log can see who we are, even though
@@ -66,6 +69,7 @@ async def lifespan(_: FastAPI):
             ),
         )
     )
+    _crawler.crawler_strategy.set_hook("on_page_context_created", protect_context)
     await _crawler.start()
     try:
         yield
@@ -158,7 +162,7 @@ async def render(req: RenderRequest) -> JSONResponse:
     if _crawler is None:
         return JSONResponse({"error": "The browser is not running."}, status_code=503)
 
-    blocked = _assert_public(req.url)
+    blocked = await asyncio.to_thread(_assert_public, req.url)
     if blocked:
         return JSONResponse({"error": blocked}, status_code=422)
 

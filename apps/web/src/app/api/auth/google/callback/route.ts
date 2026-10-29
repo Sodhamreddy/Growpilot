@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { config } from "@ob/core";
-import { signInWithGoogle, createSession } from "@/lib/auth";
+import { signInWithGoogle, createSession, GoogleAccountLinkRequired } from "@/lib/auth";
 
 /**
  * GET /api/auth/google/callback — finish the OAuth redirect.
@@ -137,8 +137,8 @@ export async function GET(req: Request): Promise<NextResponse> {
     // existing one resumes, whichever button they happened to press.
     const destination = result.created || mode === "signup" ? "/onboarding" : "/home";
     return clear(NextResponse.redirect(`${cfg.APP_URL}${destination}`));
-  } catch {
-    return clear(back("sign_in_failed"));
+  } catch (err) {
+    return clear(back(err instanceof GoogleAccountLinkRequired ? "email_sign_in_required" : "sign_in_failed"));
   }
 }
 

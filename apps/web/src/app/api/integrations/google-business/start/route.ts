@@ -2,10 +2,13 @@ export const dynamic = "force-dynamic";
 
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { config, newToken } from "@ob/core";
+import { config, hasRole } from "@ob/core";
+import { repo } from "@ob/db";
 import { GBP_SCOPE, googleCredentials } from "@ob/gmb";
 import { requireTenant } from "@/lib/auth";
 import { GBP_STATE_COOKIE } from "@/lib/google-business";
+import { integrationState } from "@/lib/integration-state";
+import { db } from "@/lib/services";
 
 /**
  * GET /api/integrations/google-business/start — connect Google Business Profile.
@@ -24,13 +27,15 @@ import { GBP_STATE_COOKIE } from "@/lib/google-business";
 
 export async function GET(): Promise<NextResponse> {
   const ctx = await requireTenant();
+  if (!hasRole(ctx, "admin")) return NextResponse.json({ error: { message: "Only admins can manage connections." } }, { status: 403 });
   const cfg = config();
   const creds = googleCredentials(cfg);
   if (!creds.clientId || !creds.clientSecret) {
     return NextResponse.redirect(`${cfg.APP_URL}/reviews?google_error=not_configured`);
   }
 
-  const state = `${newToken(24)}.${ctx.workspaceId}`;
+  const business = await repo.getPrimaryBusiness(db(), ctx);
+  const state = integrationState(ctx, business?.id ?? null);
   (await cookies()).set(GBP_STATE_COOKIE, state, {
     httpOnly: true, secure: cfg.NODE_ENV === "production", sameSite: "lax", path: "/", maxAge: 600,
   });

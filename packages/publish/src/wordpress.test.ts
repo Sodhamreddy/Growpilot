@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { AppError } from "@ob/core";
-import { verifyConnection, createPost, type WordPressCredential } from "./wordpress.js";
+import { wordPressTargetFingerprint, verifyConnection, createPost, type WordPressCredential } from "./wordpress.js";
 
 /**
  * These exercise everything up to and including the HTTP boundary, with fetch
@@ -206,4 +206,28 @@ describe("createPost", () => {
       createPost(cred, { title: "", bodyMarkdown: "", slug: "t" }),
     ).rejects.toMatchObject({ code: "validation_failed", retryable: false });
   });
+});
+
+vi.mock("@ob/seo", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@ob/seo")>(),
+  publicFetch: (url: string, init: RequestInit) => fetch(url, init),
+}));
+
+
+describe("uncertain WordPress writes", () => {
+  it("does not automatically retry a POST whose response was lost", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("connection reset")));
+    await expect(createPost(cred, { title: "T", bodyMarkdown: "B", slug: "t" })).rejects.toMatchObject({ retryable: false, details: { outcomeUnknown: true } });
+  });
+  it("does not retry a server error after creating a post", async () => {
+    stubFetch({ status: 502, body: { code: "upstream_failed" } });
+    await expect(createPost(cred, { title: "T", bodyMarkdown: "B", slug: "t" })).rejects.toMatchObject({ retryable: false, details: { outcomeUnknown: true } });
+  });
+});
+
+it("binds publication to the site while allowing password rotation", () => {
+  const original = wordPressTargetFingerprint(cred);
+  expect(wordPressTargetFingerprint({ ...cred, baseUrl: "https://example.com/wp-json/", applicationPassword: "rotated" })).toBe(original);
+  expect(wordPressTargetFingerprint({ ...cred, baseUrl: "https://another.example.com" })).not.toBe(original);
+  expect(wordPressTargetFingerprint({ ...cred, baseUrl: "https://example.com/other-site" })).not.toBe(original);
 });

@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { AppError } from "@ob/core";
-import { assertPublicHost } from "@ob/seo";
+import { assertPublicHost, publicFetch } from "@ob/seo";
 import { renderMarkdown } from "./markdown.js";
 
 /**
@@ -41,6 +42,14 @@ export interface PublishedPost {
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** A stable destination identity: rotating credentials does not change the target site. */
+export function wordPressTargetFingerprint(credential: WordPressCredential): string {
+  const url = new URL(credential.baseUrl.trim());
+  const path = url.pathname.replace(/\/+$/, "").replace(/\/wp-json$/, "");
+  return createHash("sha256").update(url.origin + path).digest("hex");
+}
+
 
 /**
  * Normalise the site URL and refuse anything that is not a public https origin.
@@ -90,12 +99,11 @@ async function call(
   init: { method: string; body?: unknown; timeoutMs?: number },
 ): Promise<unknown> {
   const root = await resolveApiRoot(cred.baseUrl);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), init.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const signal = AbortSignal.timeout(init.timeoutMs ?? DEFAULT_TIMEOUT_MS);
 
   let res: Response;
   try {
-    res = await fetch(root + path, {
+    res = await publicFetch(root + path, {
       method: init.method,
       headers: {
         Authorization: authHeader(cred),
@@ -103,7 +111,7 @@ async function call(
         Accept: "application/json",
       },
       body: init.body === undefined ? undefined : JSON.stringify(init.body),
-      signal: controller.signal,
+      signal,
       // Credentials are attached, so following a redirect could hand them to
       // another host. Handle redirects explicitly instead.
       redirect: "manual",
@@ -115,10 +123,8 @@ async function call(
       aborted
         ? "The WordPress site did not respond in time."
         : "We could not reach the WordPress site.",
-      { details: { path }, cause: err, retryable: true },
+      { details: { path, outcomeUnknown: init.method !== "GET" }, cause: err, retryable: init.method === "GET" },
     );
-  } finally {
-    clearTimeout(timer);
   }
 
   if (res.status >= 300 && res.status < 400) {
@@ -133,7 +139,11 @@ async function call(
     );
   }
 
-  const text = await res.text();
+  let text: string;
+  try { text = await res.text(); }
+  catch (cause) { throw new AppError("dependency_unavailable", "The WordPress response was interrupted. Check the site before retrying.", {
+    cause, details: { outcomeUnknown: init.method !== "GET" }, retryable: init.method === "GET",
+  }); }
   let parsed: unknown;
   try {
     parsed = text ? JSON.parse(text) : null;
@@ -144,7 +154,7 @@ async function call(
       "validation_failed",
       "That address did not return the WordPress REST API. Check the site address, and that the " +
         "REST API is not disabled by a security plugin.",
-      { details: { status: res.status, snippet: text.slice(0, 200) }, retryable: false },
+      { details: { status: res.status, outcomeUnknown: init.method !== "GET" }, retryable: false },
     );
   }
 
@@ -164,7 +174,7 @@ async function call(
       serverSide
         ? "The WordPress site returned an error. It may be temporarily unavailable."
         : "WordPress rejected the request: " + (errorMessage(parsed) ?? "HTTP " + res.status),
-      { details: { status: res.status, wp: errorCode(parsed) }, retryable: serverSide },
+      { details: { status: res.status, wp: errorCode(parsed), outcomeUnknown: serverSide && init.method !== "GET" }, retryable: serverSide && init.method === "GET" },
     );
   }
 
@@ -243,7 +253,7 @@ export async function createPost(
 
   if (typeof record.id !== "number") {
     throw new AppError("provider_error", "WordPress accepted the post but returned no id.", {
-      details: { received: JSON.stringify(created).slice(0, 200) },
+      details: { outcomeUnknown: true },
       retryable: false,
     });
   }
@@ -258,4 +268,14 @@ export async function createPost(
     externalUrl: record.link && record.link.length > 0 ? record.link : editUrl,
     status: record.status ?? status,
   };
+}
+
+/** Read a specific post when reconciling an interrupted publish. */
+export async function readPost(cred: WordPressCredential, id: number): Promise<PublishedPost> {
+  if (!Number.isSafeInteger(id) || id < 1) throw new AppError("validation_failed", "Enter a valid WordPress post ID.");
+  const row = await call(cred, `/posts/${id}?context=edit`, { method: "GET" }) as { id: number; link: string; status: string };
+  if (row.id !== id || typeof row.link !== "string" || !["publish", "future", "draft", "pending", "private"].includes(row.status)) {
+    throw new AppError("provider_error", "WordPress returned an invalid post record.", { retryable: false });
+  }
+  return { externalId: String(row.id), externalUrl: row.link, status: row.status };
 }

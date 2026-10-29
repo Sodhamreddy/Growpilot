@@ -1,8 +1,12 @@
+import { measurementWindow } from "@ob/blog";
+import { PublishRecovery } from "@/components/PublishRecovery";
+import { getClient } from "@/lib/tenant";
+import { MeasurementSettings } from "@/components/MeasurementSettings";
 import Link from "next/link";
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, and, sql, gte, lte } from "drizzle-orm";
 import { requireTenant, getSession } from "@/lib/auth";
 import { db } from "@/lib/services";
-import { integrations, publishJobs } from "@ob/db";
+import { integrations, publishJobs, metricSnapshots, articles } from "@ob/db";
 import { TopBar } from "@/components/TopBar";
 import {
   IconIntegrations, IconArticles, IconAnalytics, IconLocal, IconSocial,
@@ -39,17 +43,17 @@ const CATALOGUE = [
   { provider: "webhook", name: "Custom webhook", group: "CMS publishing", icon: <IconIntegrations />,
     needs: "A URL and shared secret. No OAuth required.", spec: "§11" },
   { provider: "google_search_console", name: "Search Console", group: "Measurement", icon: <IconAnalytics />,
-    needs: "Google OAuth client ID and secret.", spec: "§16" },
+    needs: "A service account with read access to this property.", spec: "§16", available: true, href: "#measurement" },
   { provider: "google_analytics", name: "Google Analytics 4", group: "Measurement", icon: <IconAnalytics />,
-    needs: "Google OAuth client ID and secret.", spec: "§16" },
+    needs: "A service account with read access to this property.", spec: "§16", available: true, href: "#measurement" },
   { provider: "google_business_profile", name: "Google Business Profile", group: "Local", icon: <IconLocal />,
-    needs: "Google OAuth with business.manage scope.", spec: "§8" },
+    needs: "Google OAuth with business.manage scope.", spec: "§8", available: true, href: "/reviews" },
   { provider: "linkedin", name: "LinkedIn", group: "Social", icon: <IconSocial />,
     needs: "LinkedIn app credentials.", spec: "§9" },
   { provider: "facebook", name: "Facebook", group: "Social", icon: <IconSocial />,
-    needs: "Meta app credentials.", spec: "§9" },
+    needs: "Meta app credentials.", spec: "§9", available: true, href: "/social" },
   { provider: "instagram", name: "Instagram", group: "Social", icon: <IconSocial />,
-    needs: "A Meta app and an Instagram professional account.", spec: "§9" },
+    needs: "A Meta app and an Instagram professional account.", spec: "§9", available: true, href: "/social" },
   { provider: "x", name: "X (Twitter)", group: "Social", icon: <IconSocial />,
     needs: "X developer app credentials with analytics access.", spec: "§9" },
 ];
@@ -63,34 +67,41 @@ export default async function IntegrationsPage() {
     (session?.name ?? session?.email ?? "?").split(/[\s@.]+/).filter(Boolean)
       .slice(0, 2).map((c) => c[0]!.toUpperCase()).join("") || "?";
 
+  const business = await getClient();
   const database = db();
   const connected = await database
     .select()
     .from(integrations)
     .where(eq(integrations.workspaceId, ctx.workspaceId));
 
+  const window = measurementWindow();
+  const measurement = business ? await database.select({ metric: metricSnapshots.metric, value: sql<string>`sum(${metricSnapshots.value})` })
+    .from(metricSnapshots).where(and(eq(metricSnapshots.workspaceId, ctx.workspaceId), sql`${metricSnapshots.dimensions}->>'businessId' = ${business.id}`,
+      gte(metricSnapshots.date, window.start), lte(metricSnapshots.date, window.end), sql`${metricSnapshots.metric} not like 'search_query_%'`, sql`${metricSnapshots.source} in ('google_search_console', 'google_analytics')`)).groupBy(metricSnapshots.metric) : [];
   const recentPublishes = await database
     .select({
-      provider: publishJobs.provider, status: publishJobs.status,
+      id: publishJobs.id, title: articles.title, provider: publishJobs.provider, status: publishJobs.status,
       createdAt: publishJobs.createdAt, externalUrl: publishJobs.externalUrl,
       lastError: publishJobs.lastError,
     })
     .from(publishJobs)
-    .where(eq(publishJobs.workspaceId, ctx.workspaceId))
+    .innerJoin(articles, eq(articles.id, publishJobs.entityId))
+    .where(and(eq(publishJobs.workspaceId, ctx.workspaceId), business ? eq(articles.businessId, business.id) : sql`false`))
     .orderBy(desc(publishJobs.createdAt))
     .limit(8);
 
-  const byProvider = new Map(connected.map((c) => [c.provider, c]));
+  const byProvider = new Map(connected.filter(c => c.scopeKey === "workspace" ? c.provider !== "wordpress" : c.scopeKey === business?.id).map((c) => [c.provider, c]));
 
   return (
     <>
       <TopBar section="Configure" page="Integrations" initials={initials} />
       <div className="content">
+        {business && (ctx.role === "admin" || ctx.role === "owner") ? <div id="measurement"><MeasurementSettings businessId={business.id} /></div> : null}
+        {measurement.length ? <section className="card"><h2>Recent search and website performance</h2><p>Last 28 available days, ending three days ago. Daily updates may revise recent figures.</p><dl>{measurement.map(row => <div key={row.metric}><dt>{row.metric.replaceAll("_", " ")}</dt><dd>{Number(row.value).toLocaleString()}</dd></div>)}</dl></section> : null}
         <div className="pagehead">
           <h1>Integrations</h1>
           <p>
-            Where approved content goes and where measurement comes from. Credentials are encrypted
-            at rest and never reach the browser.
+            Where approved content goes and where measurement comes from. Stored credentials are encrypted at rest and are never returned to the browser.
           </p>
         </div>
 
@@ -156,7 +167,7 @@ export default async function IntegrationsPage() {
           <>
             <div className="sectionhead">
               <h2>Publish activity</h2>
-              <span className="note">Idempotent, retryable — spec §11.1</span>
+              <span className="note">Queued work, results and recovery</span>
             </div>
             <div className="card" style={{ marginBottom: 22 }}>
               <div className="tablewrap">
@@ -167,7 +178,7 @@ export default async function IntegrationsPage() {
                   <tbody>
                     {recentPublishes.map((p, i) => (
                       <tr key={i}>
-                        <td><strong>{p.provider}</strong></td>
+                        <td><strong>{p.provider}</strong><div className="small muted">{p.title}</div></td>
                         <td>
                           <span className={`badge ${p.status === "succeeded" ? "ok" : p.status === "failed" ? "fail" : "neutral"}`}>
                             {p.status}
@@ -175,6 +186,7 @@ export default async function IntegrationsPage() {
                         </td>
                         <td className="small muted">
                           {p.externalUrl ?? p.lastError ?? "—"}
+                          {p.provider === "wordpress" && ["running", "failed", "succeeded"].includes(p.status) && (ctx.role === "admin" || ctx.role === "owner") ? <PublishRecovery id={p.id} status={p.status} /> : null}
                         </td>
                         <td className="muted small">{p.createdAt.toISOString().slice(0, 16).replace("T", " ")}</td>
                       </tr>
@@ -189,10 +201,9 @@ export default async function IntegrationsPage() {
         <div className="card">
           <h3>What can be connected today</h3>
           <p className="small muted" style={{ margin: 0, maxWidth: "70ch" }}>
-            <strong>WordPress</strong> connects now, with an application password from the target
-            site. Nothing else can yet: each remaining provider needs its own OAuth client
-            registered against this deployment&rsquo;s callback URL, and none are configured, so a
-            Connect button would open a flow that fails immediately.
+            WordPress creates drafts for the selected client. Meta and Google Business Profile use
+            their existing connection flows. Search Console and GA4 can be connected above using
+            a service account with access to the selected client's property.
           </p>
           <p className="small muted" style={{ margin: "10px 0 0", maxWidth: "70ch" }}>
             <strong>Google Business Profile</strong> needs more than credentials. Its API requires
@@ -201,9 +212,7 @@ export default async function IntegrationsPage() {
             until that is granted.
           </p>
           <p className="small muted" style={{ margin: "10px 0 0", maxWidth: "70ch" }}>
-            The storage layer is ready for all of them: the <code>integrations</code> table,
-            AES-256-GCM credential sealing and the publish queue&rsquo;s idempotency keys are built
-            and tested. Supplying credentials wires a flow without a schema change.
+            Only providers marked available have a connection flow. Other providers require an additional connector before credentials can be used.
           </p>
         </div>
       </div>

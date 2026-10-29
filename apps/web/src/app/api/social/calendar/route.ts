@@ -296,16 +296,19 @@ export const DELETE = route(async (ctx, req) => {
    * Their copy was written against a date. Unscheduling one would leave a
    * finished post with nowhere to go and no record of when it was meant to run.
    */
-  await database
-    .update(socialTopics)
-    .set({ monthId: null, status: "idea", postDate: null, updatedAt: new Date() })
-    .where(and(
-      eq(socialTopics.workspaceId, ctx.workspaceId),
-      eq(socialTopics.monthId, month.id),
-      inArray(socialTopics.status, ["scheduled"]),
-    ));
-
-  await database.delete(socialMonths).where(eq(socialMonths.id, month.id));
+  const retained = await database.transaction(async (tx) => {
+    // Serialize with month replanning, which updates this same parent row.
+    await tx.select({ id: socialMonths.id }).from(socialMonths)
+      .where(eq(socialMonths.id, month.id)).for("update");
+    await tx.update(socialTopics)
+      .set({ monthId: null, status: "idea", postDate: null, updatedAt: new Date() })
+      .where(and(eq(socialTopics.workspaceId, ctx.workspaceId), eq(socialTopics.monthId, month.id),
+        eq(socialTopics.status, "scheduled")));
+    const remaining = await tx.select({ id: socialTopics.id }).from(socialTopics)
+      .where(eq(socialTopics.monthId, month.id)).limit(1);
+    if (!remaining.length) await tx.delete(socialMonths).where(eq(socialMonths.id, month.id));
+    return remaining.length > 0;
+  });
 
   await repo.writeAudit(database, ctx, {
     action: "social.month_unplanned",
@@ -314,5 +317,5 @@ export const DELETE = route(async (ctx, req) => {
     before: { monthKey: month.monthKey },
   });
 
-  return { ok: true };
+  return { ok: true, retained };
 });

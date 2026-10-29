@@ -284,7 +284,6 @@ export function SocialContentPacks({
     router.replace(`/social/content?month=${monthKey}`, { scroll: false });
     if (canEdit && !blockedReason && posts.some((p) => p.status === "scheduled")) void writeAll();
     // Runs once, on arrival.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const open = (p: PackPost) => { setOpenId(p.id); setConfirmRewrite(false); };

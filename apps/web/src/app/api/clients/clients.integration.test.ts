@@ -5,7 +5,7 @@ import { vector } from "@electric-sql/pglite-pgvector";
 import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
 import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
-import { users, workspaces, businesses, businessSources, articles } from "@ob/db";
+import { users, workspaces, workspaceMembers, businesses, businessSources, articles, socialCategories, socialTopics, reserveAiBudget, recordAiUsage, aiReservations, repo } from "@ob/db";
 
 /**
  * Adding, switching and removing a client, against a real schema.
@@ -69,6 +69,15 @@ beforeAll(async () => {
   ];
   for (const file of ordered) {
     if (file.startsWith("pre_")) continue;
+    if (file === "post_0010_social_pool.sql") {
+      await pg.exec(`
+        INSERT INTO users (id,email,email_normalized) VALUES ('90000000-0000-4000-8000-000000000001','legacy@example.com','legacy@example.com');
+        INSERT INTO workspaces (id,owner_id,name,slug) VALUES ('90000000-0000-4000-8000-000000000002','90000000-0000-4000-8000-000000000001','Legacy','legacy');
+        INSERT INTO businesses (id,workspace_id,name) VALUES ('90000000-0000-4000-8000-000000000003','90000000-0000-4000-8000-000000000002','Legacy client');
+        INSERT INTO social_months (id,workspace_id,business_id,month_key) VALUES ('90000000-0000-4000-8000-000000000004','90000000-0000-4000-8000-000000000002','90000000-0000-4000-8000-000000000003','2026-10');
+        INSERT INTO social_topics (workspace_id,month_id,title,brief,audience,format) VALUES ('90000000-0000-4000-8000-000000000002','90000000-0000-4000-8000-000000000004','Legacy monthly topic','Keep this brief','Customers','Static Image');
+      `);
+    }
     await pg.exec(await readFile(`${dir}/${file}`, "utf8"));
   }
 
@@ -81,6 +90,7 @@ beforeAll(async () => {
   await database.insert(workspaces).values({
     id: state.ctx.workspaceId, ownerId: state.ctx.userId, name: "QA", slug: "qa",
   });
+  await database.insert(workspaceMembers).values({ workspaceId: state.ctx.workspaceId, userId: state.ctx.userId, role: "owner" });
 }, 30000);
 
 afterAll(async () => { await pg?.close(); });
@@ -132,7 +142,7 @@ describe.sequential("adding a client", () => {
     expect(source!.crawlStatus).toBe("pending");
 
     const listed = await call(listClients, undefined, "GET");
-    const [row] = await database.select().from(businesses);
+    const [row] = await database.select().from(businesses).where(eq(businesses.workspaceId, state.ctx.workspaceId));
     expect(listed.selectedId).toBe(row!.id);
   });
 
@@ -249,4 +259,43 @@ describe.sequential("removing a client", () => {
     const listed = await call(listClients, undefined, "GET");
     expect(listed.selectedId).toBe(keep.businessId);
   });
+});
+
+
+describe.sequential("deployment and isolation regressions", () => {
+  it("creates a social category and an unscheduled idea on a fresh migrated database", async () => {
+    const client = await call(addClient, { name: "Social migration client" });
+    const [category] = await database.insert(socialCategories).values({ workspaceId: state.ctx.workspaceId, businessId: client.businessId, name: "Services" }).returning();
+    const [topic] = await database.insert(socialTopics).values({ workspaceId: state.ctx.workspaceId, categoryId: category!.id, title: "A topic", hook: "An explanation", audience: "Customers", format: "Static Image" }).returning();
+    expect(topic!.status).toBe("idea");
+    expect(topic!.monthId).toBeNull();
+    expect(topic!.recommended).toBe(false);
+  });
+  it("switches one member without changing another member's client", async () => {
+    const first = await call(addClient, { name: "First member client" });
+    const second = await call(addClient, { name: "Second member client" });
+    const [other] = await database.insert(users).values({ email: "other@example.com", emailNormalized: "other@example.com", authProvider: "email" }).returning();
+    await database.insert(workspaceMembers).values({ workspaceId: state.ctx.workspaceId, userId: other!.id, role: "editor", selectedBusinessId: first.businessId });
+    await call(selectClient, { businessId: second.businessId }, "PATCH");
+    const selected = await repo.getPrimaryBusiness(database as any, { ...state.ctx, userId: other!.id, role: "editor" });
+    expect(selected!.id).toBe(first.businessId);
+  });
+  it("counts pending AI reservations before allowing another call", async () => {
+    await database.update(workspaces).set({ aiBudgetMicros: 100 }).where(eq(workspaces.id, state.ctx.workspaceId));
+    const id = await reserveAiBudget(database as any, state.ctx.workspaceId, 80);
+    await expect(reserveAiBudget(database as any, state.ctx.workspaceId, 30)).rejects.toThrow(/budget/);
+    await recordAiUsage(database as any, { workspaceId: state.ctx.workspaceId, correlationId: "test", taskAlias: "embedding", provider: "test", model: "test", promptVersion: "test", status: "succeeded", costMicros: 20 }, id);
+    expect(await database.select().from(aiReservations)).toHaveLength(0);
+    await expect(reserveAiBudget(database as any, state.ctx.workspaceId, 80)).resolves.toBeTypeOf("string");
+  });
+});
+
+it("migrates legacy monthly topics without losing their brief or deleting the pool when a month is removed", async () => {
+  const [before] = await database.select().from(socialTopics).where(eq(socialTopics.title, "Legacy monthly topic"));
+  expect(before).toMatchObject({ hook: "Keep this brief", status: "scheduled", imageIdea: "" });
+  expect(before!.categoryId).toBeTruthy();
+  await pg.exec("DELETE FROM social_months WHERE id='90000000-0000-4000-8000-000000000004'");
+  const [after] = await database.select().from(socialTopics).where(eq(socialTopics.id, before!.id));
+  expect(after!.monthId).toBeNull();
+  expect(after!.hook).toBe("Keep this brief");
 });

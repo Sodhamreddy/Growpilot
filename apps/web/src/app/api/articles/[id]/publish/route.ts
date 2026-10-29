@@ -1,8 +1,9 @@
+import { wordPressTargetFingerprint, type WordPressCredential } from "@ob/publish";
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
 import { eq, and } from "drizzle-orm";
-import { AppError, idempotencyKey } from "@ob/core";
+import { AppError, idempotencyKey, open, config } from "@ob/core";
 import { articles, publishJobs, integrations, workspaces, repo } from "@ob/db";
 import { canPublish, assertMayPublish } from "@ob/pipeline";
 import { JOBS, payloadFrom } from "@ob/jobs";
@@ -30,6 +31,7 @@ const schema = z.object({
 export const POST = route(async (ctx, req) => {
   assertMayPublish(ctx);
   const body = await parseBody(req, schema);
+  if (body.provider !== "wordpress") throw new AppError("validation_failed", "This publishing connector is not available yet.");
   const id = articleIdFrom(req);
   const database = db();
 
@@ -67,7 +69,7 @@ export const POST = route(async (ctx, req) => {
     .select()
     .from(integrations)
     .where(
-      and(eq(integrations.workspaceId, ctx.workspaceId), eq(integrations.provider, body.provider)),
+      and(eq(integrations.workspaceId, ctx.workspaceId), eq(integrations.provider, body.provider), eq(integrations.scopeKey, article.businessId)),
     )
     .limit(1);
 
@@ -78,7 +80,7 @@ export const POST = route(async (ctx, req) => {
     });
   }
 
-  if (integration.status !== "connected") {
+  if (integration.status !== "connected" || !integration.credentialSealed) {
     throw new AppError("forbidden", `The ${body.provider} connection is ${integration.status}. Reconnect it in Integrations.`, {
       details: { provider: body.provider, status: integration.status },
       retryable: false,
@@ -97,7 +99,7 @@ export const POST = route(async (ctx, req) => {
   const key = idempotencyKey("publish", body.provider, id, article.version);
 
   const [existing] = await database
-    .select({ id: publishJobs.id, status: publishJobs.status, externalUrl: publishJobs.externalUrl })
+    .select({ id: publishJobs.id, status: publishJobs.status, externalUrl: publishJobs.externalUrl, scheduledFor: publishJobs.scheduledFor })
     .from(publishJobs)
     .where(
       and(eq(publishJobs.workspaceId, ctx.workspaceId), eq(publishJobs.idempotencyKey, key)),
@@ -105,6 +107,8 @@ export const POST = route(async (ctx, req) => {
     .limit(1);
 
   if (existing) {
+    if (existing.status === "queued") await getQueues().enqueue("publish", JOBS.publishArticle,
+      payloadFrom(ctx, { publishJobId: existing.id }), { idempotencyKey: `publish-job:${existing.id}`, delayMs: Math.max(0, (existing.scheduledFor?.getTime() ?? Date.now()) - Date.now()) });
     return {
       ok: true,
       deduplicated: true,
@@ -121,13 +125,19 @@ export const POST = route(async (ctx, req) => {
     .values({
       workspaceId: ctx.workspaceId,
       provider: body.provider,
+      integrationId: integration.id,
+      articleVersion: article.version,
+      targetFingerprint: wordPressTargetFingerprint(JSON.parse(open(integration.credentialSealed, config().CREDENTIAL_ENCRYPTION_KEY)) as WordPressCredential),
       entityType: "article",
       entityId: id,
       idempotencyKey: key,
       status: "queued",
       scheduledFor,
     })
+    .onConflictDoNothing({ target: [publishJobs.workspaceId, publishJobs.idempotencyKey] })
     .returning();
+
+  if (!job) throw new AppError("conflict", "A publish request already exists. Refresh to see its status.");
 
   if (scheduledFor) {
     await database.update(articles).set({ status: "scheduled" }).where(eq(articles.id, id));

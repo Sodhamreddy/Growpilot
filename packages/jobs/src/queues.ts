@@ -294,6 +294,7 @@ export const JOBS = {
   syncReviews: "analytics.reviews-sync",
   /** Fires every few hours; queues a review sync for every client with a listing. */
   reviewsSweep: "maintenance.reviews-sweep",
+  socialInsightsSweep: "maintenance.social-insights-sweep",
   ingestMetrics: "analytics.ingest",
   refreshContent: "maintenance.refresh",
   /** Fires on a schedule; fans out one plan job per client that is due. */

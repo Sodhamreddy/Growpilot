@@ -2,8 +2,11 @@ export const dynamic = "force-dynamic";
 
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { config, newToken } from "@ob/core";
+import { config, hasRole } from "@ob/core";
+import { repo } from "@ob/db";
 import { requireTenant } from "@/lib/auth";
+import { integrationState } from "@/lib/integration-state";
+import { db } from "@/lib/services";
 
 /**
  * GET /api/integrations/meta/start — begin the Facebook/Instagram connect.
@@ -56,6 +59,7 @@ const RETURN_COOKIE = "ob_meta_return";
 
 export async function GET(req: Request): Promise<NextResponse> {
   const ctx = await requireTenant();
+  if (!hasRole(ctx, "admin")) return NextResponse.json({ error: { message: "Only admins can manage connections." } }, { status: 403 });
   const cfg = config();
 
   /*
@@ -76,8 +80,8 @@ export async function GET(req: Request): Promise<NextResponse> {
     return NextResponse.redirect(url.toString());
   }
 
-  const nonce = newToken(24);
-  const state = `${nonce}.${ctx.workspaceId}`;
+  const business = await repo.getPrimaryBusiness(db(), ctx);
+  const state = integrationState(ctx, business?.id ?? null);
 
   const jar = await cookies();
   jar.set(STATE_COOKIE, state, {

@@ -378,7 +378,7 @@ export function SocialTopicPool({
       </div>
 
       {showSettings ? (
-        <SocialPromptSettings initial={prompts} canEdit={canEdit} startOpen />
+        <SocialPromptSettings businessId={businessId ?? ""} initial={prompts} canEdit={canEdit} startOpen />
       ) : null}
 
       {blockedReason && categories.length > 0 ? (

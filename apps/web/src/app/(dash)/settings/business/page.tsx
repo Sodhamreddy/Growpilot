@@ -98,7 +98,7 @@ export default async function BusinessSettingsPage() {
     goals: workspaceRow[0]?.settings.onboarding?.goals ?? [],
   });
 
-  const wordpress = connections.find((c) => c.provider === "wordpress") ?? null;
+  const wordpress = connections.find((c) => c.provider === "wordpress" && c.scopeKey === business?.id) ?? null;
   const sourceActive = sources[0]?.status === "pending" || sources[0]?.status === "running";
 
   return (
@@ -122,6 +122,7 @@ export default async function BusinessSettingsPage() {
         ) : (
           <>
             <ClientSetupPanel
+              key={`setup:${business.id}`}
               businessId={business.id}
               businessName={business.name}
               websiteUrl={business.websiteUrl}
@@ -201,6 +202,7 @@ export default async function BusinessSettingsPage() {
               <span className="note">Logo and how Google lists you</span>
             </div>
             <BrandSection
+              key={`brand:${business.id}`}
               businessId={business.id}
               canEdit={canEdit}
               initialLogoUrl={business.logoUrl}
@@ -212,7 +214,7 @@ export default async function BusinessSettingsPage() {
               <h2>Services</h2>
               <span className="note">{services.length} listed · keyword research works from these</span>
             </div>
-            <ServicesSection businessId={business.id} canEdit={canEdit} initial={services} />
+            <ServicesSection key={`services:${business.id}`} businessId={business.id} canEdit={canEdit} initial={services} />
 
             {/* ── Locations ── */}
             <div className="sectionhead">
@@ -220,6 +222,7 @@ export default async function BusinessSettingsPage() {
               <span className="note">{locations.length} listed · needed for local content</span>
             </div>
             <LocationsSection
+              key={`locations:${business.id}`}
               businessId={business.id}
               canEdit={canEdit}
               initial={locations.map((l) => ({
@@ -235,6 +238,7 @@ export default async function BusinessSettingsPage() {
               <span className="note">{business.socialProfiles.length} listed</span>
             </div>
             <SocialSection
+              key={`social:${business.id}`}
               businessId={business.id}
               canEdit={canEdit}
               initial={business.socialProfiles}
@@ -245,7 +249,7 @@ export default async function BusinessSettingsPage() {
               <h2>WordPress</h2>
               <span className="note">Where approved articles are published</span>
             </div>
-            <WordPressSection
+            <WordPressSection key={`wordpress:${business.id}`} businessId={business.id}
               canEdit={ctx.role === "owner" || ctx.role === "admin"}
               connected={wordpress ? { displayName: wordpress.displayName, status: wordpress.status } : null}
             />

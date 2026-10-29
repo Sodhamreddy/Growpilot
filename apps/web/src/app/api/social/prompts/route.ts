@@ -46,6 +46,7 @@ export const GET = route(async (ctx) => {
 });
 
 const schema = z.object({
+  businessId: z.string().uuid(),
   topics: z.string().max(LIMITS.topics).optional(),
   post: z.string().max(LIMITS.post).optional(),
   image: z.string().max(LIMITS.image).optional(),
@@ -61,7 +62,7 @@ export const PATCH = route(async (ctx, req) => {
   const database = db();
 
   // Against the client on screen, not the workspace. See the blog route.
-  const business = await repo.getPrimaryBusiness(database, ctx);
+  const business = await repo.getBusiness(database, ctx, body.businessId);
   if (!business) {
     throw new AppError("validation_failed", "Select a client before saving instructions.", {
       retryable: false,

@@ -1,3 +1,4 @@
+import { publicFetch } from "./public-fetch.js";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 import { AppError } from "@ob/core";
@@ -45,18 +46,27 @@ export function isBlockedIp(ip: string): boolean {
     if (a === 192 && b === 168) return true;         // private
     if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
     if (a === 192 && b === 0) return true;           // IETF protocol assignments
+    if (a === 198 && (b === 18 || b === 19)) return true; // benchmarking
     if (a >= 224) return true;                       // multicast + reserved
     return false;
   }
 
   if (v === 6) {
-    const lower = ip.toLowerCase();
+    const lower = new URL(`http://[${ip}]/`).hostname.slice(1, -1).toLowerCase();
+    const hexMapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(lower);
+    if (hexMapped) {
+      const hi = parseInt(hexMapped[1]!, 16), lo = parseInt(hexMapped[2]!, 16);
+      return isBlockedIp(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+    }
+    if (/^fe[89ab]/.test(lower) || lower.startsWith("ff")) return true;
     if (lower === "::" || lower === "::1") return true;
     if (lower.startsWith("fe80")) return true;       // link-local
     if (/^f[cd]/.test(lower)) return true;           // unique local
     // IPv4-mapped (::ffff:127.0.0.1) must be checked as IPv4.
     const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(lower);
     if (mapped?.[1]) return isBlockedIp(mapped[1]);
+    // Refuse transition, discard and reserved ranges; ordinary global unicast is 2000::/3.
+    if (!/^[23]/.test(lower) || lower.startsWith("2001:db8:") || lower.startsWith("2002:")) return true;
     return false;
   }
 
@@ -118,13 +128,12 @@ export async function guardedFetch(
     }
     await assertPublicHost(url.hostname);
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), opts.timeoutMs);
+    const signal = AbortSignal.timeout(opts.timeoutMs);
     let res: Response;
     try {
-      res = await fetch(url, {
+      res = await publicFetch(url, {
         redirect: "manual", // re-validate every hop ourselves
-        signal: controller.signal,
+        signal,
         headers: {
           "User-Agent": opts.userAgent,
           Accept: opts.accept ?? "text/html,application/xhtml+xml",
@@ -137,12 +146,11 @@ export async function guardedFetch(
         details: { url: current },
         retryable: true,
       });
-    } finally {
-      clearTimeout(timer);
     }
 
     if (res.status >= 300 && res.status < 400) {
       const location = res.headers.get("location");
+      await res.body?.cancel();
       if (!location) {
         return { url: current, status: res.status, contentType: null, body: "", redirectChain };
       }

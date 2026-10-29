@@ -3,6 +3,7 @@ import { headers } from "next/headers";
 import { z } from "zod";
 import { AppError, toAppError, config, createLogger, type TenantContext } from "@ob/core";
 import { getRedis } from "./redis";
+import { readRequestJson } from "./request-json";
 
 /**
  * API route plumbing.
@@ -84,7 +85,7 @@ export function jsonError(err: unknown): NextResponse {
 
   return NextResponse.json(body, {
     status: appErr.status,
-    headers: appErr.retryable ? { "Retry-After": "5" } : {},
+    headers: appErr.retryable ? { "Retry-After": String(appErr.details?.retryInSeconds ?? 5) } : {},
   });
 }
 
@@ -100,7 +101,7 @@ export function route<T>(
       const ctx = await requireTenant();
 
       if (opts.rateLimit) {
-        await enforceRateLimit(`ws:${ctx.workspaceId}`, opts.rateLimit);
+        await enforceRateLimit(`ws:${ctx.workspaceId}:${req.method}:${new URL(req.url).pathname}`, opts.rateLimit);
       }
 
       const result = await handler(ctx, req);
@@ -130,7 +131,7 @@ export function publicRoute<T>(
       if (opts.rateLimit) {
         const hdrs = await headers();
         const ip = hdrs.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-        await enforceRateLimit(`ip:${ip}`, opts.rateLimit);
+        await enforceRateLimit(`ip:${ip}:${req.method}:${new URL(req.url).pathname}`, opts.rateLimit);
       }
       return NextResponse.json((await handler(req)) ?? { ok: true });
     } catch (err) {
@@ -140,13 +141,8 @@ export function publicRoute<T>(
 }
 
 /** Parse and validate a JSON body, surfacing field errors to the UI. */
-export async function parseBody<S extends z.ZodTypeAny>(req: Request, schema: S): Promise<z.infer<S>> {
-  let raw: unknown;
-  try {
-    raw = await req.json();
-  } catch {
-    throw new AppError("validation_failed", "The request body must be valid JSON.");
-  }
+export async function parseBody<S extends z.ZodTypeAny>(req: Request, schema: S, options: { maxBytes?: number } = {}): Promise<z.infer<S>> {
+  const raw = await readRequestJson(req, options.maxBytes);
 
   const parsed = schema.safeParse(raw);
   if (!parsed.success) {
@@ -180,24 +176,23 @@ async function enforceRateLimit(
 
   const redis = getRedis();
   const window = Math.floor(Date.now() / (opts.windowSeconds * 1000));
-  const redisKey = `ratelimit:${key}:${window}`;
+  const redisKey = `ratelimit:${key}:${opts.windowSeconds}:${window}`;
 
   let count: number;
   try {
-    count = await withTimeout(redis.incr(redisKey), 750);
+    count = Number(await withTimeout(redis.eval(
+      "local n = redis.call('INCR', KEYS[1]); if n == 1 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end; return n",
+      1, redisKey, opts.windowSeconds), 750));
   } catch (error) {
-    logger.warn("Rate limiter unavailable; allowing request", {
+    logger.warn("Rate limiter unavailable; refusing request", {
       key,
       cause: error instanceof Error ? error.message : String(error),
     });
-    return;
-  }
-  if (count === 1) {
-    void redis.expire(redisKey, opts.windowSeconds).catch(() => undefined);
+    throw new AppError("dependency_unavailable", "Please try again shortly.", { retryable: true });
   }
 
   if (count > limit) {
-    const retryInSeconds = Math.max(1, (await redis.ttl(redisKey)) || opts.windowSeconds);
+    const retryInSeconds = Math.max(1, (await withTimeout(redis.ttl(redisKey), 750)) || opts.windowSeconds);
     throw new AppError(
       "rate_limited",
       `Too many attempts. Please try again in ${formatWait(retryInSeconds)}.`,
@@ -209,13 +204,13 @@ async function enforceRateLimit(
   }
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<T>((_, reject) => {
-      setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
-    }),
-  ]);
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<T>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
 }
 
 /** Turn a retry delay into something a person can act on. */

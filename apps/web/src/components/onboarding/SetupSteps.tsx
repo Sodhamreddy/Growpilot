@@ -99,7 +99,6 @@ export function ColorsStep({
       cancelled = true;
     };
     // Runs once on mount; controlled values/callbacks intentionally are not dependencies.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const colors = value.length > 0 ? value : (detected ?? []);

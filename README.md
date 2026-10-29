@@ -1,292 +1,123 @@
-# Our Brand — AI SEO & Content Automation Platform
+# GrowPilot
 
-Implementation of `Our_Brand_AI_SEO_Content_Automation_With_Brand_Voice_Explanation.docx`.
+GrowPilot is a multi-client content workspace for blog automation, social planning and publishing, business intelligence, and Google Business Profile reviews.
 
-This build covers the spec's **Phase 1–3** (§17): auth and multi-tenancy, onboarding,
-automatic business detection, the knowledge base, the brand voice engine, the AI
-gateway, job orchestration, and the article pipeline through to approval.
+The existing monorepo remains organized as a Next.js web app, a BullMQ worker, shared TypeScript packages, and an optional Python rendering service.
 
-**It is not the whole spec.** See [What is not built](#what-is-not-built) — that
-section is the honest part of this README and worth reading before the rest.
+## Local setup
 
----
+Requirements: Node.js 22+, pnpm 10.33, Postgres with pgvector, and Redis. The optional rendering service requires Python and Chromium; see [its setup guide](services/crawler/README.md).
 
-## Quick start
-
-```bash
-pnpm install
-cp .env.example .env          # fill in the two secrets below
-docker compose up -d          # Postgres 16 + pgvector, Redis 7
-pnpm db:generate              # generate the Drizzle migration from the schema
-pnpm db:migrate               # extensions → schema → indexes
-pnpm db:seed                  # demo workspace, confirmed profile, active voice
-pnpm dev                      # http://localhost:3002
-pnpm dev:worker               # in a second terminal — nothing runs without this
-```
-
-The web app listens on **3002**, not 3000 — 3000 and 3001 are commonly taken by
-other Next projects. Override with `pnpm --filter=@ob/web dev -- -p 4000`.
-
-There is **one `.env`, at the repo root**. Next normally only reads `.env` from
-its own directory, so [apps/web/next.config.mjs](apps/web/next.config.mjs) loads
-the root file explicitly; the worker, `db:migrate` and `db:seed` do the same. A
-real environment variable always overrides the file, so containers and CI are
-unaffected.
-
-### Database — Supabase
-
-Postgres with pgvector, no local install.
-
-1. Create a project at [supabase.com](https://supabase.com).
-2. **Project Settings → Database → Connection string → Session pooler**, and put
-   it in `DATABASE_URL` in the root `.env`.
-3. In the SQL editor, once: `CREATE EXTENSION IF NOT EXISTS vector;`
-4. Then:
-
-```bash
+```sh
+pnpm install --frozen-lockfile
+cp .env.example .env
+# Fill in DATABASE_URL, REDIS_URL, CREDENTIAL_ENCRYPTION_KEY, and AUTH_SECRET.
+# For disposable local infrastructure:
+docker compose up -d
+pnpm typecheck
 pnpm db:migrate
-pnpm db:seed
-pnpm dev           # web on :3002 AND the worker, in one terminal
+pnpm db:seed       # Optional demo data; development only.
+pnpm dev
 ```
 
-`pnpm dev` starts both processes. The worker used to be a separate command you
-had to remember, and forgetting it is indistinguishable from the app being
-broken: pages load, buttons work, and nothing ever finishes because no process
-is consuming the queue.
+On PowerShell, use `Copy-Item .env.example .env`. Generate each secret independently with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"`.
 
-`pnpm dev:web` and `pnpm dev:worker` still run them separately when you want
-one without the other.
+The app runs at **http://localhost:3002**. `pnpm dev` starts web, worker, and the crawler launcher together; do not start a second worker unintentionally. Use `pnpm dev:web`, `pnpm dev:worker`, or `pnpm dev:crawler` to run them separately. Configure the optional crawler before using its launcher.
 
-`pnpm --filter=@ob/web build` writes to `.next-build`, not `.next`. Running a
-production build into the directory a dev server is using replaces its manifests
-with production ones, and the dev server then dies on a `routes-manifest.json`
-that no longer describes it — recoverable only by deleting `.next` and starting
-over.
+Use the committed migrations for setup. `pnpm db:generate` is for deliberate schema development, not a prerequisite for installing the application. Manual `post_` migrations follow generated migrations; future generated migrations must account for these existing changes.
 
-`dev:worker` runs the worker directly. `pnpm --filter=@ob/worker dev:watch` adds
-file watching and restarts on save — useful when editing processors, but avoid
-it if the repo lives in a synced folder (OneDrive, Dropbox): the watcher sees
-the sync churn as edits and restarts in a loop or exits.
+Environment variables are loaded from the root `.env`, with process environment variables taking precedence. `AI_MOCK=1` uses deterministic local generation for development. It does not turn live CMS or social publishing into a mock; leave those accounts disconnected in test environments.
+
+## Project layout
+
+| Location | Responsibility |
+| --- | --- |
+| `apps/web` | Next.js App Router UI, authentication, API endpoints |
+| `apps/worker` | Background processing, schedules, retries, durable publication dispatch |
+| `packages/core` | Configuration, errors, tenancy, encryption, logging, cancellation |
+| `packages/db` | Schema, migrations, repositories, atomic AI budget reservations |
+| `packages/ai` | Provider routing, generation, embeddings, cost accounting |
+| `packages/seo`, `voice`, `kb`, `pipeline` | Crawling, analysis, brand voice, retrieval, quality gates |
+| `packages/blog`, `publish` | Keyword research, content planning, measurement, WordPress |
+| `packages/social`, `gmb`, `companion`, `jobs` | Social workflows, reviews, assistant, queues |
+| `services/crawler` | Optional Chromium rendering and Maps support |
+
+## Client selection and publishing
+
+Client selection is stored per workspace member. WordPress connections belong to a specific client, and a queued article records its destination, site fingerprint, and article version. Changes to that destination or version require a new reviewed attempt.
+
+WordPress exports are **drafts**. Publishing the draft on WordPress remains a human action. The Integrations page can reconcile a WordPress post ID and update the article when the post is actually live.
+
+Social publishing requires approved copy and an approved image. Each successful network result is saved before the next network is called. A timeout or crash after a publishing request can leave the result uncertain; the application holds it for review rather than sending another post automatically.
+
+- WordPress recovery: **Integrations → Publish activity**. Reconcile the existing post ID, or confirm no post exists before retrying.
+- Social recovery: **Social → Schedule → Recover interrupted publishing**. An administrator checks each network and records the existing post or confirms it is absent. Failed networks can then be scheduled again.
+- Queued WordPress and social publications are periodically dispatched from database records, so a lost enqueue does not silently lose the work.
+
+## Optional connections
+
+| Feature | Configuration |
+| --- | --- |
+| Production password reset | `RESEND_API_KEY`, verified `EMAIL_FROM`, correct public `APP_URL` |
+| AI providers | Keys and model routing in `.env.example` and `packages/ai/src/registry.ts` |
+| Keyword volume and difficulty | `DATAFORSEO_LOGIN`, `DATAFORSEO_PASSWORD`, numeric `DATAFORSEO_LOCATION_CODE` |
+| Search Console / GA4 | Per-client service-account connection on **Integrations** |
+| WordPress | Per-client site URL, username, application password in Settings |
+| Facebook / Instagram | Meta application permissions and the client's selected Page |
+| Instagram image hosting | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, optional storage bucket |
+| Google Business Profile | Google GBP OAuth credentials; Maps key where required |
+
+Keyword data remains null when no metrics provider is configured. DataForSEO uses its own provider credit, separate from the AI budget. The location code supplies the default market. A research location overrides it using the provider's exact location name.
+
+For Google measurement, enable the Search Console API or Analytics Data API in the service account's project. Grant that service account read access to the exact Search Console property or GA4 property, then paste the service-account JSON into the corresponding client connection form. Use a Search Console property such as `sc-domain:example.com` or its exact URL-prefix property, and a numeric GA4 property ID. Credentials are sealed before storage and are not returned by the API.
+
+Measurement sync refreshes 28 days ending three days ago and preserves older daily history. GSC query rows are separate from site totals to avoid double counting. Available query demand can add at most ten priority points during future content planning; it does not fabricate search volume or automatically rewrite approved content. Query data can be incomplete because of provider privacy filtering and a 100,000-row sync cap. Analytics and email require real account permissions to validate end to end.
+
+API references: [Search Console](https://developers.google.com/webmaster-tools/v1/searchanalytics/query), [GA4 reporting](https://developers.google.com/analytics/devguides/reporting/data/v1/rest/v1beta/properties/runReport), [Google service accounts](https://developers.google.com/identity/protocols/oauth2/service-account), [DataForSEO keyword overview](https://docs.dataforseo.com/v3/dataforseo_labs-google-keyword_overview-live/), [Resend email](https://resend.com/docs/api-reference/emails/send-email).
+
+## Reliability and security
+
+Remote database connections verify certificates and hostnames by default. Supabase database hosts automatically use the bundled [Supabase root CA](https://supabase-downloads.s3-ap-southeast-1.amazonaws.com/prod/ssl/prod-ca-2021.crt), so the session and transaction poolers work without disabling verification. For other private CAs, export `NODE_EXTRA_CA_CERTS` before starting Node; setting it in `.env` is too late for Node's startup trust configuration. `DATABASE_SSL=require` is an explicit compatibility override that disables certificate verification. Localhost defaults to an unencrypted local connection. Size `DATABASE_POOL_MAX` for the total number of web and worker processes.
+
+AI calls reserve estimated cost under a workspace database lock before starting. Completed usage replaces that reservation atomically. Embeddings participate in the same budget. Update model prices when changing models, including `EMBEDDING_COST_PER_MTOK` ([Google pricing](https://ai.google.dev/gemini-api/docs/pricing)). Usage accounting is an estimate and does not replace the provider invoice. Failed calls with uncertain billing or interrupted accounting retain their reservation conservatively. An operator should compare those holds with provider usage before releasing them; current-month holds count toward the budget. A budget of zero means unlimited.
+
+Public URL connections validate every resolved address and pin the actual socket to a checked address. Redirects are checked independently. Browser requests use a guarded resolver; private subresources and WebSockets are blocked, with a deny proxy for browser traffic that bypasses interception. Keep the rendering service on a private interface and apply deployment egress restrictions as an additional boundary.
+
+Password-reset tokens are consumed atomically and existing sessions are removed on success. Production resets use email; local development displays a test link. Rate limits are scoped by route, method, and tenant or IP, and return a temporary failure if Redis is unavailable. Reverse proxies must overwrite untrusted forwarding headers.
+
+## Verification
+
+```sh
+pnpm typecheck
+pnpm --filter=@ob/web exec tsc --noEmit
+pnpm lint
+pnpm test --maxWorkers=2 --minWorkers=1
+pnpm --filter=@ob/web build
+# From the crawler virtual environment:
+python -m unittest discover -s services/crawler -p 'test_network.py'
 ```
 
-**Use the session pooler (port 5432), not the transaction pooler (6543).** The
-worker runs multi-statement transactions and the knowledge-base index writes
-pgvector batches; a transaction pooler hands each transaction a different
-backend, and that breaks in ways which only appear under load. `prepare: false`
-is set regardless, because prepared statements are the other thing poolers
-break.
+The suite includes database migration and client-isolation integration tests using PGlite, publishing failure tests, budget tests, provider response tests, and URL protection tests. CI additionally migrates and seeds disposable Postgres, builds the web app, runs authenticated HTTP smoke checks, and builds both deployment images. `scripts/smoke.mjs` is CI-only and must use disposable data. Browser interaction and real external accounts still need deployment-specific acceptance testing.
 
-Supabase caps total connections per project — 60 on the free tier, shared
-across web, worker, and anything else holding a connection. `DATABASE_POOL_MAX`
-is per process, so keep the sum under that ceiling.
+Production builds use `.next-build`, separate from the development server's `.next`. In a synced directory such as OneDrive, use the non-watching worker command if filesystem churn causes restarts.
 
-TLS is on automatically for any non-localhost host. `DATABASE_SSL=disable` for a
-plain local server, `=verify` to demand a chain that validates.
+## Deployment and upgrading
 
-### Other options
-
-`docker compose up -d` is the easy path, but only Postgres genuinely needs it —
-and it must have the **pgvector** extension, which the retrieval layer depends on.
-If Docker is not available:
-
-- **Hosted Postgres** is the least painful option. Neon and Supabase both ship
-  pgvector; create a database and point `DATABASE_URL` at it.
-- **Redis** can be any Redis-compatible server. Memurai works on Windows.
-
-Check what the app can actually reach at any time:
-
-```bash
-curl http://localhost:3002/api/health
+```sh
+docker build --target web -t growpilot-web .
+docker build --target worker -t growpilot-worker .
 ```
 
-It reports each dependency separately and returns 503 until both are up.
+The web image listens on **3002**. Both images need runtime environment variables, reachable Postgres and Redis, and the same credential encryption key. Run web and worker together. Provide shared persistent image storage (or configured Supabase Storage) when they run separately. Set `IMAGE_STORE_DIR` to the same mounted directory in both processes if using local storage. Run the optional crawler separately and set `CRAWLER_SERVICE_URL` to its private address.
 
-Two secrets have no safe default and must be generated:
+Before rolling out this upgrade:
 
-```bash
-openssl rand -base64 32   # → CREDENTIAL_ENCRYPTION_KEY
-openssl rand -base64 32   # → AUTH_SECRET
-```
+1. Back up the database and stop old workers while migrating.
+2. Run `pnpm db:migrate` once with the deployment database configuration, then start the new web and worker versions together.
+3. Reconnect WordPress explicitly for each client. Legacy shared connections are preserved, but queued jobs with no unambiguous destination are marked failed for review.
+4. Check **Integrations → Publish activity** and social schedules for interrupted work before retrying it. Older social schedules without a recorded target account must be reviewed and scheduled again.
+5. Confirm `/api/health` returns 200 and the worker heartbeat is healthy. Validate production password recovery and configured providers with designated test accounts.
 
-Set `ANTHROPIC_API_KEY` for real generation, or `AI_MOCK=1` to run the entire
-pipeline offline against a deterministic local provider.
+The social migration preserves existing monthly topics in an “Existing topics” category, retains the legacy brief as the hook, and allows new unscheduled ideas. Do not run `db:reset` or the demo seed against production. The Docker context excludes local environment files, dependency directories, build output, and stored images.
 
-The seed prints demo credentials. **Change the password before exposing the app.**
-
----
-
-## Architecture
-
-```
-apps/web        Next.js 15 App Router — UI + 19 API routes
-apps/worker     BullMQ workers — 7 queues
-packages/core   Config, typed errors, tenancy, crypto, redacting logger
-packages/db     Drizzle schema (16 entities), tenant-scoped repositories
-packages/ai     AI Gateway: task-alias routing, fallback, cost accounting
-packages/seo    Crawler, HTML parser, explainable scorer, deterministic checks
-packages/voice  Brand voice profile, prompt rendering, voice QA
-packages/kb     Chunking and pgvector retrieval
-packages/jobs   Queue definitions, idempotency, dead-letter, replay
-packages/pipeline  Extraction, brief, article, quality gates, approval FSM
-```
-
-Postgres 16 + pgvector · Redis 7 · TypeScript strict · 113 unit tests.
-
-### Design decisions worth knowing
-
-**Tenancy is a parameter, not a convention.** Every repository function takes a
-`TenantContext` as its first argument and derives its `WHERE` clause from it.
-There is no code path that reads workspace data without one
-([packages/db/src/repo.ts](packages/db/src/repo.ts)).
-
-**The AI gateway is the only thing that knows model names.** Features request a
-task alias (`writing_long`, `structured_json`); the registry maps aliases to a
-provider/model fallback chain. Changing models is an edit to one table
-([packages/ai/src/registry.ts](packages/ai/src/registry.ts)). The gateway
-enforces the per-workspace budget *before* spending and records model, prompt
-version, tokens, latency and cost for every attempt, successful or not.
-
-**Prompt layers are structurally separated** (spec §18.4). `composeSystemPrompt`
-is the only way to build a system prompt and enforces the order
-`SYSTEM RULES → SAFETY → BUSINESS FACTS → SOURCE EVIDENCE → BRAND VOICE → TASK →
-OUTPUT FORMAT`. It returns the offset where the stable prefix ends, which the
-Anthropic adapter uses as a cache breakpoint — generating a batch of articles for
-one business reuses the cached prefix.
-
-**Publication is gated by a state machine, not by discipline.** `draft →
-published` is not a legal transition. `canPublish` re-reads live state at publish
-time rather than trusting that the gates passed earlier
-([packages/pipeline/src/approval.ts](packages/pipeline/src/approval.ts)).
-
-**The crawler cannot be used as a proxy.** It accepts a customer-supplied URL, so
-it resolves DNS up front, rejects private/loopback/link-local/metadata addresses,
-and re-validates every redirect hop
-([packages/seo/src/crawler/fetch.ts](packages/seo/src/crawler/fetch.ts)). The spec
-does not mention this; no crawler taking arbitrary input is production-ready
-without it.
-
-**Missing data is shown as missing.** No keyword provider is configured, so
-volume and difficulty are `null` and the UI renders "no data". A fabricated
-search volume would flow into the opportunity score and into a content plan a
-customer acts on.
-
----
-
-## Spec coverage
-
-| § | Area | Status |
-|---|---|---|
-| 2 | Onboarding, signup, progressive questions | Built |
-| 3 | Crawl, extraction, evidence + confidence | Built |
-| 4 | Knowledge base, chunking, pgvector retrieval | Built |
-| 5 | Multi-LLM gateway, aliases, fallback, budgets | Built |
-| 6.1 | Keyword seeds, intent, clustering, prioritisation | Built (no volume provider) |
-| 6.2–6.3 | Brief → draft → QA → approval | Built |
-| 7.1 | Explainable weighted score | Built — exact weights, 16 tests |
-| 10 | Home, sidebar, UX principles | Built (5 of 12 modules) |
-| 11 | Publishing architecture, idempotency, credential encryption | Data model + route only |
-| 12 | 7 queues, retry, DLQ, replay, correlation IDs | Built |
-| 13 | Data model — 16 entities | Built |
-| 14 | API structure | All 18 routes + health |
-| 15 | Tenancy, encryption, audit, rate limits, 7 quality gates | Built |
-| 16 | Analytics | Schema + endpoint; no ingestion |
-| 18 | Brand voice engine | Built — extraction, rules, QA, channels |
-
-### What is not built
-
-Deferred from Phase 4–8, and honestly labelled in the UI (greyed sidebar items):
-
-- **CMS publishing execution.** `/api/articles/:id/publish` validates everything,
-  writes a `publish_jobs` row and guarantees idempotency — but no worker performs
-  the WordPress/Webflow/Ghost call. The seam is clean; the connector is missing.
-- **OAuth integrations.** The `integrations` table, credential sealing
-  (AES-256-GCM) and status handling exist. No provider flow is wired.
-- **Analytics ingestion.** Search Console / GA4 / rank tracking. The endpoint
-  returns an empty `sources` list and says so rather than showing zeros.
-- **Local SEO, Social Media, Content Hub calendar, SEO Audit module,
-  Preferences UI.**
-- **Google OAuth signup.** Email/password is complete; `GOOGLE_CLIENT_ID` is
-  read but unused.
-- **JS rendering.** The crawler is a static fetcher. It detects client-rendered
-  sites and reports `jsHeavy` with a warning instead of silently extracting
-  nothing (spec §18.1 critical test).
-
----
-
-## Two corrections to the spec
-
-**1. The model table in §5.1 names models I cannot verify.** `GPT-5.6 Sol`,
-`GPT-5.6 Terra`, `GPT-5.6 Luna` and `Gemini 3.1 Pro` are not identifiers I can
-confirm exist. Rather than hardcode them, [registry.ts](packages/ai/src/registry.ts)
-pins verified Anthropic models and declares the OpenAI/Google rungs from
-environment variables, so they activate the moment you supply a real model name
-plus a key. Current Anthropic models and list pricing:
-
-| Role in §5.1 | Model | Input / Output per 1M |
-|---|---|---|
-| Complex reasoning, research | `claude-opus-5` | $5 / $25 |
-| Long-form writing, editing | `claude-sonnet-5` | $2 / $10 |
-| Bulk classification | `claude-haiku-4-5` | $1 / $5 |
-
-Spec §5.1 also lists `Claude Sonnet 4.6`, which is real but previous-generation;
-`claude-sonnet-5` supersedes it at lower cost.
-
-**2. §18 is used twice** — "QA & Acceptance Criteria" and "Brand Voice & Content
-Voice Engine" share the number. Both are implemented; this README cites the brand
-voice one as §18 throughout.
-
----
-
-## Testing
-
-```bash
-pnpm test          # 113 tests, no network, no credentials
-pnpm typecheck     # strict, project references
-```
-
-Coverage is deliberately concentrated on what is expensive to get wrong:
-
-| Area | Tests | Why |
-|---|---|---|
-| SSRF guard | 17 | The crawler takes user-supplied URLs |
-| Credential sealing, password hashing | 14 | Tamper detection, timing, unicode |
-| Explainable score | 16 | Weights must match §7.1 exactly and stay explainable |
-| Voice QA | 23 | Banned terms, unsupported claims, CTA conformance |
-| robots.txt | 14 | Longest-match precedence, wildcards, UA specificity |
-| Approval state machine | 18 | `draft → published` must be unreachable |
-| AI gateway | 11 | Fallback, retry policy, budget, cost accounting |
-
-One test caught a real bug during the build: a stuffed article scored *above* a
-clean one because the fixture's body never contained the keyword. The fixture was
-wrong; the scorer was right. Both are now realistic.
-
----
-
-## Deployment
-
-```bash
-docker build --target web    -t ourbrand-web .
-docker build --target worker -t ourbrand-worker .
-```
-
-The web image exposes `/api/health`, which returns 503 when Postgres or Redis is
-unreachable so a load balancer stops routing to it.
-
-**Before you put this in front of a customer:**
-
-1. Rotate `CREDENTIAL_ENCRYPTION_KEY` and `AUTH_SECRET`; store them in a secrets
-   manager, not in `.env`.
-2. Change the seeded demo password, or do not run the seed.
-3. Set a real `CRAWL_USER_AGENT` with a contact URL.
-4. Review the per-workspace `ai_budget_micros` default (currently $50/month).
-5. Put TLS in front of the web container — the session cookie sets `secure` only
-   when `NODE_ENV=production`.
-6. Run `pnpm db:migrate` as a deploy step; the worker and web do not self-migrate.
-
----
-
-## The original document
-
-[docs/legacy-mockup/](docs/legacy-mockup/) holds the earlier static prototype
-(hardcoded data, localStorage) that this replaces. It is kept for reference only
-and is not part of the build.
+Webflow, Ghost, custom webhook publishing, LinkedIn/X publishing, and rank-tracker ingestion remain unavailable. They are separate features, not enabled by adding credentials to the existing implemented connectors.

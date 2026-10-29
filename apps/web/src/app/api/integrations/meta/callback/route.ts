@@ -3,11 +3,13 @@ export const dynamic = "force-dynamic";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
-import { config, seal } from "@ob/core";
+import { config, seal, hasRole } from "@ob/core";
 import { businesses, integrations, repo } from "@ob/db";
 import { exchangeForLongLivedToken, listPages, grantedPermissions, GraphError } from "@ob/social";
 import { requireTenant } from "@/lib/auth";
-import { db } from "@/lib/services";
+import { JOBS, payloadFrom } from "@ob/jobs";
+import { db, getQueues } from "@/lib/services";
+import { readIntegrationState } from "@/lib/integration-state";
 
 /**
  * GET /api/integrations/meta/callback — finish the connect.
@@ -40,6 +42,7 @@ function backTo(path: string, reason: string | null): NextResponse {
 
 export async function GET(req: Request): Promise<NextResponse> {
   const ctx = await requireTenant();
+  if (!hasRole(ctx, "admin")) return NextResponse.json({ error: { message: "Only admins can manage connections." } }, { status: 403 });
   const cfg = config();
   const params = new URL(req.url).searchParams;
 
@@ -55,7 +58,8 @@ export async function GET(req: Request): Promise<NextResponse> {
   if (params.get("error")) return back("cancelled");
 
   const state = params.get("state");
-  if (!expected || !state || state !== expected) return back("state_mismatch");
+  const binding = readIntegrationState(expected, state, ctx);
+  if (!binding) return back("state_mismatch");
 
   /*
    * The workspace comes from the state cookie, not from the session.
@@ -65,8 +69,8 @@ export async function GET(req: Request): Promise<NextResponse> {
    * way back, which is how a client's Facebook data lands in someone else's
    * dashboard.
    */
-  const [, stateWorkspaceId] = expected.split(".");
-  if (!stateWorkspaceId || stateWorkspaceId !== ctx.workspaceId) return back("wrong_workspace");
+  const business = binding.businessId ? await repo.getBusiness(db(), ctx, binding.businessId).catch(() => null) : null;
+  if (binding.businessId && !business) return back("state_mismatch");
 
   const code = params.get("code");
   if (!code) return back("no_code");
@@ -168,12 +172,19 @@ export async function GET(req: Request): Promise<NextResponse> {
      * several Pages (an agency's login) the person still picks, on the page
      * they return to, because guessing would post to someone else's audience.
      */
-    const business = await repo.getPrimaryBusiness(database, ctx);
     if (business && !business.metaPageId && pages.length === 1) {
       await database
         .update(businesses)
         .set({ metaPageId: pages[0]!.id, metaPageName: pages[0]!.name, updatedAt: new Date() })
         .where(and(eq(businesses.workspaceId, ctx.workspaceId), eq(businesses.id, business.id)));
+    }
+
+    // Start this client's first refresh immediately; a temporary queue outage
+    // does not discard the successfully saved connection.
+    if (business && (pages.some((p) => p.id === business.metaPageId) || (!business.metaPageId && pages.length === 1))) {
+      await getQueues().enqueue("analytics", JOBS.ingestMetrics,
+        payloadFrom(ctx, { businessId: business.id, days: 30 }),
+        { idempotencyKey: `meta-sync:${business.id}:${Date.now()}` }).catch(() => undefined);
     }
 
     await repo.writeAudit(database, ctx, {

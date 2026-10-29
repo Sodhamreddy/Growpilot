@@ -1,7 +1,8 @@
+import { sendPasswordReset } from "@/lib/email";
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
-import { config } from "@ob/core";
+import { AppError, config } from "@ob/core";
 import { publicRoute, parseBody } from "@/lib/api";
 import { beginPasswordReset } from "@/lib/auth";
 
@@ -13,10 +14,7 @@ import { beginPasswordReset } from "@/lib/auth";
  * "no such account" is a user-enumeration endpoint no matter what else it does.
  * The person who owns the inbox finds out; nobody else does.
  *
- * No email provider is configured in this build. Rather than pretend a message
- * was sent, the link is returned in the response when APP_ENV is development,
- * and a clear note is logged. Silently dropping the token would leave a
- * customer waiting for an email that was never going to arrive.
+ * Production delivers via Resend; local development displays the link for testing.
  */
 
 const schema = z.object({
@@ -28,6 +26,9 @@ export const POST = publicRoute(
     const body = await parseBody(req, schema);
     const cfg = config();
 
+    if (cfg.NODE_ENV === "production" && (!cfg.RESEND_API_KEY || !cfg.EMAIL_FROM)) {
+      throw new AppError("dependency_unavailable", "Password recovery is temporarily unavailable. Contact your administrator.");
+    }
     const started = await beginPasswordReset(body.email);
 
     const sameAnswer = {
@@ -41,20 +42,12 @@ export const POST = publicRoute(
 
     const resetUrl = `${cfg.APP_URL}/reset-password?token=${encodeURIComponent(started.token)}`;
 
-    /*
-     * Where the email would be sent.
-     *
-     * Wiring a provider (Resend, SES, Postmark) means replacing this block and
-     * nothing else: the token is already created, hashed and stored.
-     */
     const isProduction = cfg.NODE_ENV === "production";
 
     if (isProduction) {
-      // Never put a live credential in a log line.
-      console.warn(
-        "[auth] Password reset requested but no email provider is configured. " +
-          "The customer will not receive a link.",
-      );
+      // Keep the public response identical for registered and unknown addresses.
+      try { await sendPasswordReset(body.email, resetUrl); }
+      catch { console.error("[auth] Reset delivery failed; check the email provider."); }
       return sameAnswer;
     }
 
@@ -66,7 +59,7 @@ export const POST = publicRoute(
       // mistaken for behaviour that survives into production.
       devResetUrl: resetUrl,
       devNote:
-        "No email provider is configured, so the link is shown here instead of being sent. " +
+        "Development mode shows the link here instead of sending an email. " +
         "This only happens outside production.",
     };
   },

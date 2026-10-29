@@ -38,7 +38,7 @@ const schema = z.object({
 export const POST = route(
   async (ctx, req) => {
     requireRole(ctx, "admin");
-    const body = await parseBody(req, schema);
+    const body = await parseBody(req, schema, { maxBytes: 8 * 1024 * 1024 });
     if (body.step === "goals" && !body.goals?.length) throw new AppError("validation_failed", "Choose at least one goal.");
     if (body.step === "pillars" && new Set(body.contentPillars).size < 2) throw new AppError("validation_failed", "Choose at least two content themes.");
     if (body.skipped && !["discovery", "colors"].includes(body.step)) throw new AppError("validation_failed", "This step cannot be skipped.");

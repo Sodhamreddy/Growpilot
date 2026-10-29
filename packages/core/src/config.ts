@@ -6,13 +6,15 @@ import { z } from "zod";
  */
 const schema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
-  APP_URL: z.string().url().default("http://localhost:3000"),
+  APP_URL: z.string().url().default("http://localhost:3002"),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   REDIS_URL: z.string().min(1, "REDIS_URL is required"),
 
   CREDENTIAL_ENCRYPTION_KEY: z.string().min(1, "CREDENTIAL_ENCRYPTION_KEY is required"),
+  RESEND_API_KEY: z.string().optional(),
+  EMAIL_FROM: z.string().optional(),
   AUTH_SECRET: z.string().min(16, "AUTH_SECRET must be at least 16 characters"),
 
   ANTHROPIC_API_KEY: z.string().optional(),

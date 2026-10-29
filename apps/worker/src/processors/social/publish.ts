@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { AppError, open } from "@ob/core";
 import { businesses, integrations, repo, socialCategories, socialTopics, type PackSchedule, type SocialContentPack } from "@ob/db";
 import {
@@ -58,14 +58,24 @@ export async function processPublishSocialPost(
     log.info("Skipping a publish job for a time the post no longer has");
     return { status: "stale" };
   }
+  if (schedule.status === "publishing") {
+    throw new AppError("conflict", "Publishing was interrupted. Check the networks before retrying.", { retryable: false });
+  }
   if (schedule.status === "published") return { status: "published" };
+
+  if (Date.parse(schedule.at) > Date.now()) throw new AppError("conflict", "The publish time has not arrived.", { retryable: true });
+  const claimed = await wc.db.update(socialTopics)
+    .set({ pack: { ...topic.pack, schedule: { ...schedule, status: "publishing" } }, updatedAt: new Date() })
+    .where(and(eq(socialTopics.id, topic.id), eq(socialTopics.workspaceId, ctx.workspaceId),
+      sql`${socialTopics.pack} = ${JSON.stringify(topic.pack)}::jsonb`)).returning({ id: socialTopics.id });
+  if (!claimed.length) return { status: "stale" };
 
   const pack: SocialContentPack = topic.pack;
   const save = async (next: PackSchedule, published = false) => {
     await wc.db
       .update(socialTopics)
-      .set({ pack: { ...pack, schedule: next }, ...(published ? { status: "published" as const } : {}), updatedAt: new Date() })
-      .where(eq(socialTopics.id, topic.id));
+      .set({ pack: sql`jsonb_set(${socialTopics.pack}, '{schedule}', ${JSON.stringify(next)}::jsonb)`, ...(published ? { status: "published" as const } : {}), updatedAt: new Date() })
+      .where(and(eq(socialTopics.id, topic.id), eq(socialTopics.workspaceId, ctx.workspaceId), sql`${socialTopics.pack}->'schedule'->>'at' = ${schedule.at}`));
   };
   /** Mark every unpublished network failed with one reason, and stop without retrying. */
   const failAll = async (reason: string) => {
@@ -91,11 +101,11 @@ export async function processPublishSocialPost(
   if (!business?.metaPageId) return failAll("No Facebook Page is chosen for this client. Choose one on the Schedule step.");
 
   const [connection] = await wc.db
-    .select({ credentialSealed: integrations.credentialSealed })
+    .select({ credentialSealed: integrations.credentialSealed, status: integrations.status })
     .from(integrations)
     .where(and(eq(integrations.workspaceId, ctx.workspaceId), eq(integrations.provider, "facebook")))
     .limit(1);
-  if (!connection?.credentialSealed) return failAll("Facebook is not connected. Connect it on the Schedule step.");
+  if (!connection?.credentialSealed || connection.status !== "connected") return failAll("Facebook is not connected. Connect it on the Schedule step.");
 
   let page: SealedCredential["pages"][number] | undefined;
   try {
@@ -106,10 +116,13 @@ export async function processPublishSocialPost(
   }
   if (!page) return failAll(`The Facebook Page chosen for ${business.name} is not reachable with this connection. Reconnect or choose it again.`);
 
+  if (schedule.pageId !== page.id || (schedule.networks.includes("instagram") && schedule.instagramId !== page.instagramId)) {
+    return failAll("The destination changed or was not recorded by the old scheduler. Review the selected accounts and schedule this post again.");
+  }
   const image = pack.image!;
-  await save({ ...schedule, status: "publishing" });
 
   const result = await publishScheduled(pack, schedule, {
+    checkpoint: async (next) => { await save(next); },
     facebook: async (message) => {
       const file = await readImage(ctx.workspaceId, image.key);
       if (!file) throw new GraphError({ message: "The post's image is missing from storage. Upload or generate it again.", permanent: true });

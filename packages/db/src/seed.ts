@@ -1,3 +1,4 @@
+import { createDatabase } from "./client.js";
 import { config as loadEnv } from "dotenv";
 import { fileURLToPath as envFileURLToPath } from "node:url";
 import { dirname as envDirname, join as envJoin } from "node:path";
@@ -9,8 +10,6 @@ loadEnv({
 });
 
 import { randomBytes } from "node:crypto";
-import postgres from "postgres";
-import { drizzle } from "drizzle-orm/postgres-js";
 import { eq } from "drizzle-orm";
 import { hashPassword, slugify } from "@ob/core";
 import * as s from "./schema.js";
@@ -37,8 +36,7 @@ async function main() {
     process.exit(1);
   }
 
-  const sql = postgres(url, { max: 1, onnotice: () => {} });
-  const db = drizzle(sql, { schema: s });
+  const { sql, db } = createDatabase(url, { max: 1 });
 
   try {
     const [existing] = await db
@@ -70,6 +68,7 @@ async function main() {
         ownerId: user!.id,
         name: "Demo workspace",
         slug: `${slugify("Demo workspace")}-${randomBytes(3).toString("hex")}`,
+        onboardingCompletedAt: new Date(),
         settings: {
           requireApprovalBeforePublish: true,
           requireHumanReviewForSensitive: true,

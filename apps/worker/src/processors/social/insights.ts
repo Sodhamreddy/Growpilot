@@ -1,4 +1,5 @@
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, isNotNull, or, sql } from "drizzle-orm";
+import { JOBS } from "@ob/jobs";
 import { AppError, open } from "@ob/core";
 import { businesses, integrations, metricSnapshots } from "@ob/db";
 import {
@@ -170,37 +171,33 @@ export async function processSocialInsights(
     return { rows: 0, sources: [] };
   }
 
-  /*
-   * Replace the window, do not append to it.
-   *
-   * Every run re-fetches the same days, so appending would multiply each
-   * day's figure by the number of syncs — a chart that climbs because the job
-   * ran, not because anything happened. Deleting the covered range first
-   * makes a re-run idempotent.
-   */
-  const earliest = rows.reduce((min, row) => (row.date < min ? row.date : min), rows[0]!.date);
-
+  // Replace only the exact points returned. Post dates can be much older than
+  // daily insight dates, and an omitted/failed metric must not erase history.
   await wc.db.transaction(async (tx) => {
-    await tx.delete(metricSnapshots).where(and(
-      eq(metricSnapshots.workspaceId, ctx.workspaceId),
-      // Only the sources this job owns. A blanket delete would take Search
-      // Console and GA4 rows with it, which share this table.
-      inArray(metricSnapshots.source, ["facebook", "instagram"]),
-      gte(metricSnapshots.date, earliest),
-      // And only this client's: an agency syncs several businesses into one
-      // workspace, and clearing the window for all of them would delete rows
-      // this run is not about to replace.
-      sql`${metricSnapshots.dimensions}->>'businessId' = ${payload.businessId}`,
-    ));
-
-    await tx.insert(metricSnapshots).values(rows.map((row) => ({
-      workspaceId: ctx.workspaceId,
-      source: row.source,
-      metric: row.metric,
-      date: row.date,
-      value: row.value,
-      dimensions: row.dimensions,
-    })));
+    const [current] = await tx.select({ metaPageId: businesses.metaPageId }).from(businesses)
+      .where(and(eq(businesses.workspaceId, ctx.workspaceId), eq(businesses.id, payload.businessId)))
+      .for("update");
+    if (current?.metaPageId !== business.metaPageId) {
+      throw new AppError("conflict", "The selected Facebook Page changed during sync. Refresh its insights again.", { retryable: false });
+    }
+    for (let offset = 0; offset < rows.length; offset += 100) {
+      const batch = rows.slice(offset, offset + 100);
+      await tx.delete(metricSnapshots).where(and(
+        eq(metricSnapshots.workspaceId, ctx.workspaceId),
+        sql`${metricSnapshots.dimensions}->>'businessId' = ${payload.businessId}`,
+        or(...batch.map((row) => and(
+          eq(metricSnapshots.source, row.source), eq(metricSnapshots.metric, row.metric),
+          eq(metricSnapshots.date, row.date),
+          row.dimensions.postId
+            ? sql`${metricSnapshots.dimensions}->>'postId' = ${row.dimensions.postId}`
+            : sql`${metricSnapshots.dimensions}->>'postId' IS NULL`,
+        ))),
+      ));
+      await tx.insert(metricSnapshots).values(batch.map((row) => ({
+        workspaceId: ctx.workspaceId, source: row.source, metric: row.metric,
+        date: row.date, value: row.value, dimensions: row.dimensions,
+      })));
+    }
   });
 
   log.info("Social insights ingested", { rows: rows.length, sources: [...sources] });
@@ -218,4 +215,21 @@ async function markFailed(wc: WorkerContext, workspaceId: string, message: strin
         eq(integrations.provider, provider),
       ));
   }
+}
+
+/** Refresh all selected Pages daily; individual failures remain isolated jobs. */
+export async function processSocialInsightsSweep(wc: WorkerContext) {
+  const rows = await wc.db.select({ id: businesses.id, workspaceId: businesses.workspaceId })
+    .from(businesses).innerJoin(integrations, and(
+      eq(integrations.workspaceId, businesses.workspaceId), eq(integrations.provider, "facebook"),
+      eq(integrations.status, "connected"),
+    )).where(isNotNull(businesses.metaPageId));
+  const window = Math.floor(Date.now() / 86_400_000);
+  for (const b of rows) {
+    await wc.queues.enqueue("analytics", JOBS.ingestMetrics, {
+      workspaceId: b.workspaceId, businessId: b.id, userId: "system",
+      correlationId: `meta-${b.id.slice(0, 8)}-${window}`,
+    }, { idempotencyKey: `meta-insights:${b.id}:${window}` });
+  }
+  return { queued: rows.length };
 }

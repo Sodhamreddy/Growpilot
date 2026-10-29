@@ -166,3 +166,25 @@ describe("the Graph calls", () => {
     expect(await grantedPermissions("t", fetcher as never)).toEqual(["pages_manage_posts"]);
   });
 });
+
+describe("publish durability", () => {
+  it("checkpoints Facebook before Instagram and stops on a checkpoint failure", async () => {
+    const instagram = vi.fn(ok("ig"));
+    const checkpoint = vi.fn(async () => { throw new Error("database offline"); });
+    await expect(publishScheduled(pack, schedule, { facebook: ok("fb"), instagram, checkpoint })).rejects.toThrow("database offline");
+    expect(checkpoint.mock.calls[0]![0].results.facebook.id).toBe("fb");
+    expect(instagram).not.toHaveBeenCalled();
+  });
+  it("holds uncertain outcomes for manual reconciliation", async () => {
+    const instagram = vi.fn(ok("ig"));
+    const result = await publishScheduled(pack, schedule, { facebook: async () => { throw new GraphError({ message: "unknown", permanent: true, outcomeUnknown: true }); }, instagram });
+    expect(result.schedule.status).toBe("publishing");
+    expect(result.retry).toBe(false);
+    expect(instagram).not.toHaveBeenCalled();
+  });
+  it("treats unreadable responses after a final POST as uncertain", async () => {
+    const fetcher = vi.fn(async () => new Response("bad gateway", { status: 502 }));
+    await expect(publishFacebookPhoto({ id: "p", accessToken: "t" }, { message: "Hi", image: new Uint8Array([1]), mimeType: "image/png" }, fetcher as never))
+      .rejects.toMatchObject({ outcomeUnknown: true, permanent: true });
+  });
+});

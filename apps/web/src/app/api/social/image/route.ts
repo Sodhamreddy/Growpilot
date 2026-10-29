@@ -8,6 +8,7 @@ import {
   type Database, type PackImage, type SocialContentPack,
 } from "@ob/db";
 import { generatePostImage, scheduleLock } from "@ob/social";
+import { socialRevision, unchangedSocialTopic, requireSocialWrite } from "@/lib/social-write";
 import { route, parseBody } from "@/lib/api";
 import { db, getGateway } from "@/lib/services";
 import { saveImage, deleteImage, imageUrl } from "@/lib/image-store";
@@ -39,6 +40,7 @@ async function loadTopic(database: Database, ctx: TenantContext, topicId: string
   const [topic] = await database
     .select({
       id: socialTopics.id,
+      revision: socialRevision,
       status: socialTopics.status,
       format: socialTopics.format,
       pack: socialTopics.pack,
@@ -73,15 +75,21 @@ function approvedPack(topic: { status: string; pack: SocialContentPack | null })
 async function storeImage(
   database: Database,
   ctx: TenantContext,
-  topicId: string,
+  topic: { id: string; revision: string },
   pack: SocialContentPack,
   image: PackImage,
 ) {
   const next: SocialContentPack = { ...pack, image };
-  await database
-    .update(socialTopics)
-    .set({ pack: next, imageUrl: imageUrl(image.key), updatedAt: new Date() })
-    .where(eq(socialTopics.id, topicId));
+  try {
+    const saved = await database.update(socialTopics)
+      .set({ pack: next, imageUrl: imageUrl(image.key), updatedAt: new Date() })
+      .where(unchangedSocialTopic(ctx.workspaceId, topic)).returning({ id: socialTopics.id });
+    requireSocialWrite(saved);
+  } catch (err) {
+    // The new image belongs only to this failed attempt. Keep the previous image.
+    await deleteImage(ctx.workspaceId, image.key).catch(() => undefined);
+    throw err;
+  }
   if (pack.image && pack.image.key !== image.key) await deleteImage(ctx.workspaceId, pack.image.key);
   return next;
 }
@@ -102,7 +110,7 @@ export const POST = route(
       const topic = await loadTopic(database, ctx, topicId.data);
       const pack = approvedPack(topic);
       const saved = await saveImage(ctx.workspaceId, topic.id, new Uint8Array(await file.arrayBuffer()));
-      const next = await storeImage(database, ctx, topic.id, pack, {
+      const next = await storeImage(database, ctx, topic, pack, {
         key: saved.key, mimeType: saved.mimeType, source: "uploaded", status: "draft",
         createdAt: new Date().toISOString(),
       });
@@ -138,7 +146,7 @@ export const POST = route(
     });
 
     const saved = await saveImage(ctx.workspaceId, topic.id, result.data);
-    const next = await storeImage(database, ctx, topic.id, pack, {
+    const next = await storeImage(database, ctx, topic, pack, {
       key: saved.key, mimeType: saved.mimeType, source: "generated", status: "draft",
       createdAt: new Date().toISOString(), prompt: result.prompt, model: result.model,
     });
@@ -168,7 +176,8 @@ export const PATCH = route(async (ctx, req) => {
     ...pack,
     image: { ...pack.image, status: body.action === "approve" ? "approved" : "draft" },
   };
-  await database.update(socialTopics).set({ pack: next, updatedAt: new Date() }).where(eq(socialTopics.id, topic.id));
+  requireSocialWrite(await database.update(socialTopics).set({ pack: next, updatedAt: new Date() })
+    .where(unchangedSocialTopic(ctx.workspaceId, topic)).returning({ id: socialTopics.id }));
   await repo.writeAudit(database, ctx, {
     action: body.action === "approve" ? "social.image_approved" : "social.image_unapproved",
     entityType: "social_topic",

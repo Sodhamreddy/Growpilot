@@ -1,6 +1,7 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "./schema.js";
+import { databaseSsl } from "./ssl.js";
 
 export type Database = ReturnType<typeof createDatabase>["db"];
 
@@ -32,31 +33,11 @@ export function createDatabase(url: string, opts: { max?: number; onnotice?: () 
    */
   const idleTimeout = Number(process.env.DATABASE_IDLE_TIMEOUT ?? 20);
 
-  /*
-   * TLS.
-   *
-   * Managed Postgres (Supabase, Neon, RDS) requires it, and the credential is
-   * on the wire either way — so it is on by default and only a plain localhost
-   * URL opts out. `require` rather than full chain verification because these
-   * providers front the database with certificates the default Node trust store
-   * does not always carry; the connection is still encrypted.
-   *
-   * Set DATABASE_SSL=disable for a local server, or =verify to demand a chain
-   * that validates.
-   */
-  const sslMode = process.env.DATABASE_SSL
-    ?? (/localhost|127\.0\.0\.1/.test(url) ? "disable" : "require");
-
-  const ssl =
-    sslMode === "disable" ? false
-    : sslMode === "verify" ? "verify-full" as const
-    : { rejectUnauthorized: false };
-
   const sql = postgres(url, {
     max,
     idle_timeout: idleTimeout,
     connect_timeout: connectTimeout,
-    ssl,
+    ssl: databaseSsl(url),
     // Postgres NOTICE output is noise in application logs.
     onnotice: opts.onnotice ?? (() => {}),
     /*

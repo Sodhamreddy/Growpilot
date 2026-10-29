@@ -216,7 +216,7 @@ export const ROUTES: Record<TaskAlias, RoutePolicy> = {
       {
         provider: process.env.EMBEDDING_PROVIDER ?? "google",
         model: process.env.EMBEDDING_MODEL ?? "gemini-embedding-001",
-        inputCostPerMTok: Number(process.env.EMBEDDING_COST_PER_MTOK ?? 0),
+        inputCostPerMTok: Number(process.env.EMBEDDING_COST_PER_MTOK ?? 150_000),
         outputCostPerMTok: 0,
         maxTokens: 0,
       },

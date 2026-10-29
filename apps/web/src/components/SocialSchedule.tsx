@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { SocialPublishRecovery } from "./SocialPublishRecovery";
 import { useEffect, useRef, useState } from "react";
 import type { PackSchedule, SocialContentPack, SocialNetworkId } from "@ob/db";
 import { pictureRatio } from "@ob/social/text";
@@ -294,7 +295,6 @@ export function SocialSchedule({
                   <button type="button" className="sipack-thumb" style={{ aspectRatio: "4 / 5" }} onClick={() => setOpenId(p.id)}
                           aria-label={`Open ${p.title}`}>
                     {image ? (
-                      // eslint-disable-next-line @next/next/no-img-element
                       <img src={imageUrl(image.key)} alt={p.pack?.altText || p.title} />
                     ) : (
                       <span className="sipack-placeholder">No image yet</span>
@@ -325,6 +325,7 @@ export function SocialSchedule({
                     {s && (state === "failed" || state === "partial") ? (
                       <p className="spack-card-error" title={failures(s)}>{failures(s)}</p>
                     ) : null}
+                    {canConnect && s?.status === "publishing" ? <SocialPublishRecovery topicId={p.id} schedule={s} onSaved={pack => setSchedule(p.id, pack, pack.schedule?.status === "published" ? "published" : undefined)} /> : null}
                     {errors[p.id] ? <p className="spack-card-error" title={errors[p.id]}>{errors[p.id]}</p> : null}
                     <div className="spack-card-actions">
                       {state === "blocked" && !fixableHere(blocker) ? (
@@ -585,7 +586,6 @@ function ScheduleDialog({
             <div className="sipack-left">
               <div className="sipack-preview" style={{ aspectRatio: cssRatio(post.format) }}>
                 {image ? (
-                  // eslint-disable-next-line @next/next/no-img-element
                   <img src={imageUrl(image.key)} alt={post.pack?.altText || post.title} />
                 ) : (
                   <span className="sipack-placeholder">No image yet</span>

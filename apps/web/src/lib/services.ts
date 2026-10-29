@@ -1,5 +1,5 @@
 import { config, createLogger } from "@ob/core";
-import { getDb, repo, aiJobs, workspaces, type Database } from "@ob/db";
+import { getDb, repo, reserveAiBudget, recordAiUsage, aiJobs, workspaces, type Database } from "@ob/db";
 import { Gateway, buildProviders } from "@ob/ai";
 import { QueueRegistry } from "@ob/jobs";
 import { eq } from "drizzle-orm";
@@ -54,8 +54,9 @@ export function getGateway(): Gateway {
       AI_MOCK: cfg.AI_MOCK,
     }),
     logger: log(),
+    reserveBudget: (workspaceId, estimate) => reserveAiBudget(db(), workspaceId, estimate),
     recordJob: async (r) => {
-      await db().insert(aiJobs).values({
+      await recordAiUsage(db(), {
         workspaceId: r.workspaceId,
         correlationId: r.correlationId,
         taskAlias: r.taskAlias,
@@ -71,7 +72,7 @@ export function getGateway(): Gateway {
         attemptIndex: r.attemptIndex,
         error: r.error ?? null,
         finishedAt: new Date(),
-      });
+      }, r.reservationId);
     },
     spendThisPeriod: async (workspaceId) => {
       const now = new Date();

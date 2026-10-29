@@ -8,6 +8,7 @@ import { TopBar } from "@/components/TopBar";
 import { IconBusiness, IconLocal, IconSocial, IconIntegrations, IconSettings, IconVoiceNav, IconArticles, IconCheck, IconArrow } from "@/components/Icons";
 import { BrandSection, ServicesSection, LocationsSection, SocialSection, WordPressSection } from "@/components/BusinessInfoForms";
 import { PreferencesForm } from "@/components/PreferencesForm";
+import { TeamSettings } from "@/components/TeamSettings";
 
 export const dynamic = "force-dynamic";
 
@@ -44,7 +45,7 @@ export default async function SettingsPage() {
   ]);
   const pendingVoice = !voice && draftVoices.length > 0;
   const services = facts.filter((f)=>f.key === "service");
-  const wordpress = connections.find((c)=>c.provider === "wordpress");
+  const wordpress = connections.find((c)=>c.provider === "wordpress" && c.scopeKey === business?.id);
   const prefs = workspace?.settings;
   const canEdit = ctx.role === "owner" || ctx.role === "admin" || ctx.role === "editor";
   const canAdmin = ctx.role === "owner" || ctx.role === "admin";
@@ -54,22 +55,25 @@ export default async function SettingsPage() {
     <nav className="settings-tabs"><a href="#business" className="active"><IconBusiness size={14}/>Business Info</a><a href="#voice"><IconVoiceNav size={14}/>Brand Voice</a><a href="#services">Services</a><a href="#locations"><IconLocal size={14}/>Locations</a><a href="#social"><IconSocial size={14}/>Social Channels</a><a href="#integrations"><IconIntegrations size={14}/>Integrations</a><a href="#wordpress"><IconArticles size={14}/>WordPress</a><a href="#preferences"><IconSettings size={14}/>Preferences</a></nav>
 
     <div className="settings-grid">
-      <SettingsCard id="business" icon={<IconBusiness/>} title="Business Info" subtitle="Your brand details and Google presence" action="Edit" editor={business ? <BrandSection businessId={business.id} canEdit={canEdit} initialLogoUrl={business.logoUrl} initialGmbName={business.gmbName}/> : <p>Add a business before editing its profile.</p>}>
+      {canAdmin ? <SettingsCard id="team" icon={<IconSettings/>} title="Team" subtitle="Members and workspace permissions" action="Manage" editor={<TeamSettings key={ctx.workspaceId}/>}>
+        <p className="settings-copy">View workspace members and their roles. The owner can update permissions.</p>
+      </SettingsCard> : null}
+      <SettingsCard id="business" icon={<IconBusiness/>} title="Business Info" subtitle="Your brand details and Google presence" action="Edit" editor={business ? <BrandSection key={business.id} businessId={business.id} canEdit={canEdit} initialLogoUrl={business.logoUrl} initialGmbName={business.gmbName}/> : <p>Add a business before editing its profile.</p>}>
         <div className="settings-fields"><Field label="Business name" value={business?.name ?? "Not configured"}/><Field label="Website URL" value={business?.websiteUrl?.replace(/^https?:\/\//,"") ?? "Not configured"}/><Field label="Industry" value={business?.industry ?? "Not configured"}/><Field label="Target audience" value={business?.audience ?? "Not configured"}/></div>
       </SettingsCard>
       <SettingsCard id="voice" icon={<IconVoiceNav/>} title="Brand Voice" subtitle="How should the AI write for your brand?" action="Details" editor={<div className="inline-info"><strong>{voice ? "Active brand voice" : pendingVoice ? "A profile is waiting to be activated" : "No brand voice yet"}</strong><p>{voice ? "The learned profile is already applied to blogs, social posts, and review replies." : pendingVoice ? "The website crawl learned a voice for this client. Until it is activated, content is written without it and the brand quality gate stays a warning." : "A profile is created automatically once the website crawl finishes."}</p><p style={{marginTop:8}}><Link href="/voice">Open Brand Voice <IconArrow size={13}/></Link></p></div>}>
         <Status ready={Boolean(voice)}>{voice ? "Brand voice learned and active" : pendingVoice ? "Learned, not yet activated" : "Brand voice is not configured"}</Status><p className="settings-copy">Used for blogs, social media, and review replies.</p>
       </SettingsCard>
-      <SettingsCard id="services" icon={<IconBusiness/>} title="Services" subtitle="Manage the services you offer" action="Manage" editor={business ? <ServicesSection businessId={business.id} canEdit={canEdit} initial={services.map((s)=>({id:s.id,value:s.value,verified:s.verified,sourceUrl:s.sourceUrl}))}/> : null}>
+      <SettingsCard id="services" icon={<IconBusiness/>} title="Services" subtitle="Manage the services you offer" action="Manage" editor={business ? <ServicesSection key={business.id} businessId={business.id} canEdit={canEdit} initial={services.map((s)=>({id:s.id,value:s.value,verified:s.verified,sourceUrl:s.sourceUrl}))}/> : null}>
         <div className="settings-list">{services.slice(0,4).map((s)=><span key={s.id}>{s.value}</span>)}{services.length===0?<em>No services added yet</em>:null}</div><span className="settings-more">Manage all {services.length} services above</span>
       </SettingsCard>
-      <SettingsCard id="locations" icon={<IconLocal/>} title="Locations" subtitle="Add and manage your locations" action="Manage" editor={business ? <LocationsSection businessId={business.id} canEdit={canEdit} initial={locations.map((l)=>({id:l.id,label:l.label,streetAddress:l.streetAddress,locality:l.locality,region:l.region,postalCode:l.postalCode,country:l.country,phone:l.phone}))}/> : null}>
+      <SettingsCard id="locations" icon={<IconLocal/>} title="Locations" subtitle="Add and manage your locations" action="Manage" editor={business ? <LocationsSection key={business.id} businessId={business.id} canEdit={canEdit} initial={locations.map((l)=>({id:l.id,label:l.label,streetAddress:l.streetAddress,locality:l.locality,region:l.region,postalCode:l.postalCode,country:l.country,phone:l.phone}))}/> : null}>
         <div className="settings-list">{locations.slice(0,3).map((l)=><span key={l.id}><b>{l.label}</b><small>{[l.locality,l.region].filter(Boolean).join(", ")}</small></span>)}{locations.length===0?<em>No locations added yet</em>:null}</div><span className="settings-more">Manage all {locations.length} locations above</span>
       </SettingsCard>
-      <SettingsCard id="social" icon={<IconSocial/>} title="Social Channels" subtitle="Add your social media profiles" action="Manage" editor={business ? <SocialSection businessId={business.id} canEdit={canEdit} initial={business.socialProfiles}/> : null}>
+      <SettingsCard id="social" icon={<IconSocial/>} title="Social Channels" subtitle="Add your social media profiles" action="Manage" editor={business ? <SocialSection key={business.id} businessId={business.id} canEdit={canEdit} initial={business.socialProfiles}/> : null}>
         <ConnectionRows items={["Instagram","Facebook","LinkedIn","X (Twitter)","Pinterest"]} connected={connections.map((c)=>c.provider)}/>
       </SettingsCard>
-      <SettingsCard id="wordpress" icon={<IconArticles/>} title="WordPress" subtitle="Connect your site to auto-publish" action="Manage" editor={<WordPressSection canEdit={canAdmin} connected={wordpress ? {displayName:wordpress.displayName,status:wordpress.status} : null}/>}>
+      <SettingsCard id="wordpress" icon={<IconArticles/>} title="WordPress" subtitle="Connect your site to auto-publish" action="Manage" editor={<WordPressSection key={business?.id ?? "none"} businessId={business?.id ?? ""} canEdit={canAdmin} connected={wordpress ? {displayName:wordpress.displayName,status:wordpress.status} : null}/>}>
         <Status ready={wordpress?.status === "connected"}>{wordpress?.status === "connected" ? (wordpress.displayName ?? "Connected") : "Not connected"}</Status><p className="settings-copy">Approved articles can publish directly to your website.</p>
       </SettingsCard>
       <SettingsCard id="integrations" icon={<IconIntegrations/>} title="Integrations" subtitle="Connection readiness and provider status" action="Details" editor={<div className="inline-info"><strong>Provider credentials required</strong><p>Google, Webflow, and Ghost connections require OAuth or API credentials registered for this deployment. Their live status is shown here; unavailable Connect buttons are intentionally not displayed.</p></div>}>

@@ -38,7 +38,7 @@ describe("article state machine", () => {
     } catch (e) {
       const err = e as AppError;
       expect(err.code).toBe("conflict");
-      expect(err.details["allowed"]).toEqual(["generating", "failed"]);
+      expect(err.details["allowed"]).toEqual(["generating", "qa", "failed"]);
       // The message must be readable by a person (spec §10.3).
       expect(err.safeMessage).toBe('An article cannot move from "draft" to "published".');
     }
@@ -46,6 +46,10 @@ describe("article state machine", () => {
 });
 
 describe("statusAfterGates", () => {
+  it.each(["draft", "needs_changes", "awaiting_approval"] as const)("allows %s to be checked again before approval", (status) => {
+    expect(canTransition(status, "qa")).toBe(true);
+    expect(canTransition("qa", "awaiting_approval")).toBe(true);
+  });
   it("sends a failing article back for changes", () => {
     expect(statusAfterGates(false, {})).toBe("needs_changes");
     expect(statusAfterGates(false, { requireApprovalBeforePublish: false })).toBe("needs_changes");

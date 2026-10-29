@@ -8,6 +8,7 @@ import {
   type Database, type SocialContentPack,
 } from "@ob/db";
 import { writeContentPack, packWarnings, overlayText, scheduleLock } from "@ob/social";
+import { socialRevision, unchangedSocialTopic, requireSocialWrite } from "@/lib/social-write";
 import { route, parseBody } from "@/lib/api";
 import { db, getGateway } from "@/lib/services";
 
@@ -47,6 +48,7 @@ async function loadTopic(database: Database, ctx: TenantContext, topicId: string
   const [topic] = await database
     .select({
       id: socialTopics.id,
+      revision: socialRevision,
       title: socialTopics.title,
       hook: socialTopics.hook,
       audience: socialTopics.audience,
@@ -209,10 +211,9 @@ export const POST = route(
 
     // A picture made earlier stays, back in draft: new copy may change its words.
     const pack = withStaleImage(result.pack, topic.pack);
-    await database
-      .update(socialTopics)
+    requireSocialWrite(await database.update(socialTopics)
       .set({ pack, status: "written", updatedAt: new Date() })
-      .where(eq(socialTopics.id, topic.id));
+      .where(unchangedSocialTopic(ctx.workspaceId, topic)).returning({ id: socialTopics.id }));
 
     await repo.writeAudit(database, ctx, {
       action: topic.pack ? "social.pack_rewritten" : "social.pack_written",
@@ -271,10 +272,9 @@ export const PATCH = route(async (ctx, req) => {
     status = "written";
   }
 
-  await database
-    .update(socialTopics)
+  requireSocialWrite(await database.update(socialTopics)
     .set({ pack, status, updatedAt: new Date() })
-    .where(eq(socialTopics.id, topic.id));
+    .where(unchangedSocialTopic(ctx.workspaceId, topic)).returning({ id: socialTopics.id }));
 
   if (body.action !== "save") {
     await repo.writeAudit(database, ctx, {

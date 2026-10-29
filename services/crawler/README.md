@@ -44,3 +44,9 @@ with them disagreeing.
 The one exception is the SSRF check, which is deliberately implemented in both
 places: this service listens on a port, so anything that can reach it can ask it
 to fetch a URL. A guard that only exists in the caller is not a guard.
+
+## Network boundary
+
+Browser HTTP requests, including redirects and subresources, are intercepted and fetched with `network.PublicResolver`, which checks all DNS answers and returns the checked addresses for the connection. Literal IPs are checked separately. Responses are limited to 5 MiB and 30 seconds. WebSockets are closed, and a local deny proxy prevents browser requests that bypass interception from reaching arbitrary destinations. Keep this service private; it is not an authenticated public API.
+
+Run network regression tests with `python -m unittest test_network.py` from this directory. These tests use mocked DNS and do not contact external websites.

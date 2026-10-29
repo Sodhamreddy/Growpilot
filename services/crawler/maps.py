@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from playwright.async_api import Browser, Page, async_playwright
+from network import protect_context, deny_proxy
 
 # Hosts a Maps link may use. Short links redirect to google.com/maps.
 _ALLOWED = re.compile(
@@ -58,7 +59,7 @@ async def _get_browser() -> Browser:
     async with _lock:
         if _browser is None or not _browser.is_connected():
             _playwright = _playwright or await async_playwright().start()
-            _browser = await _playwright.chromium.launch(headless=True)
+            _browser = await _playwright.chromium.launch(headless=True, proxy={"server": await deny_proxy()}, args=["--proxy-bypass-list=<-loopback>", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"])
         return _browser
 
 
@@ -155,11 +156,13 @@ async def read_reviews(url: str, limit: int = 50, timeout_ms: int = 45_000) -> d
     """Open the listing and read up to `limit` newest reviews."""
     browser = await _get_browser()
     context = await browser.new_context(
+        service_workers="block",
         locale="en-US",
         viewport={"width": 1280, "height": 900},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     )
     page = await context.new_page()
+    await protect_context(page, context)
     page.set_default_timeout(timeout_ms)
     try:
         await page.goto(url, wait_until="domcontentloaded")

@@ -105,6 +105,27 @@ export const POST = route(
       },
     });
 
+    // Pin actions to the client used to interpret the request, never an AI ID.
+    if (result.intent === "plan_month" && business) {
+      result.args["businessId"] = business.id;
+      result.action = `Preview ${String(result.args["month"])} for ${business.name}. You can review it before saving.`;
+    }
+    if (result.intent === "plan_month" && !business) {
+      return { ok: true, intent: "explain", args: {}, needsConfirmation: false, action: null,
+        reply: "Select or add a client before planning a month." };
+    }
+    // Use the existing editors for actions that need a topic or revision brief.
+    // Never present a confirmation button for an action we cannot execute.
+    if (result.intent === "generate_blog") {
+      return { ok: true, intent: "navigate", args: { route: "blog" }, needsConfirmation: false,
+        action: null, reply: "Opening Blog Automation. Choose a topic there to generate an article." };
+    }
+    if (result.intent === "revise_section" || result.intent === "filter") {
+      return { ok: true, intent: "explain", args: {}, needsConfirmation: false, action: null,
+        reply: result.intent === "revise_section"
+          ? "Use the article's revision editor to describe the change and preview it before applying."
+          : "Use the filters on this page to choose the results you want to see." };
+    }
     return { ok: true, ...result };
   },
   /*

@@ -34,7 +34,9 @@ export async function getBusiness(db: Database, ctx: TenantContext, id: string) 
 export async function getPrimaryBusiness(db: Database, ctx: TenantContext) {
   const [workspace] = await db.select({ settings: s.workspaces.settings, completedAt: s.workspaces.onboardingCompletedAt })
     .from(s.workspaces).where(eq(s.workspaces.id, ctx.workspaceId)).limit(1);
-  const selectedId = workspace?.settings.onboarding?.businessId;
+  const [member] = await db.select({ selectedBusinessId: s.workspaceMembers.selectedBusinessId })
+    .from(s.workspaceMembers).where(and(eq(s.workspaceMembers.workspaceId, ctx.workspaceId), eq(s.workspaceMembers.userId, ctx.userId))).limit(1);
+  const selectedId = member?.selectedBusinessId ?? (!workspace?.completedAt ? workspace?.settings.onboarding?.businessId : undefined);
   if (selectedId) {
     const [selected] = await db
       .select()
@@ -129,6 +131,12 @@ export async function getActiveVoice(db: Database, ctx: TenantContext, businessI
 
 export async function activateVoice(db: Database, ctx: TenantContext, voiceId: string) {
   return db.transaction(async (tx) => {
+    const [target] = await tx.select({ businessId: s.brandVoices.businessId }).from(s.brandVoices)
+      .where(and(eq(s.brandVoices.workspaceId, ctx.workspaceId), eq(s.brandVoices.id, voiceId))).limit(1);
+    if (!target) throw notFound("brand voice");
+    // Shared with voice edits: only one activation/edit may run for a client.
+    await tx.select({ id: s.businesses.id }).from(s.businesses)
+      .where(and(eq(s.businesses.workspaceId, ctx.workspaceId), eq(s.businesses.id, target.businessId))).for("update");
     const [voice] = await tx
       .select()
       .from(s.brandVoices)

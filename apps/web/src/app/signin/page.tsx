@@ -51,6 +51,7 @@ const AUTH_ERRORS: Record<string, string> = {
   google_unreachable: "Could not reach Google. Check your connection and try again.",
   no_email: "That Google account has no email address attached.",
   sign_in_failed: "Could not sign you in with that Google account.",
+  email_sign_in_required: "This address uses email sign-in. Sign in with your password, or use Forgot password. Google accounts are not automatically linked for your security.",
 };
 
 export default async function SignInPage({

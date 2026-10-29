@@ -81,14 +81,15 @@ export default async function SocialInsightsPage({ searchParams }: { searchParam
     database.select({ provider: integrations.provider, status: integrations.status, displayName: integrations.displayName })
       .from(integrations).where(and(eq(integrations.workspaceId, ctx.workspaceId), inArray(integrations.provider, providers))),
     database.select({ source: metricSnapshots.source, metric: metricSnapshots.metric, date: metricSnapshots.date,
-      value: metricSnapshots.value, dimensions: metricSnapshots.dimensions })
+      value: metricSnapshots.value, dimensions: metricSnapshots.dimensions, ingestedAt: metricSnapshots.ingestedAt })
       .from(metricSnapshots).where(and(eq(metricSnapshots.workspaceId, ctx.workspaceId),
         inArray(metricSnapshots.source, providers), inArray(metricSnapshots.metric, METRICS), gte(metricSnapshots.date, since)))
       .orderBy(asc(metricSnapshots.date)),
   ]);
 
   const scoped = rawRows.filter((row) => (channel === "all" || row.source === channel) &&
-    (!business || !row.dimensions.businessId || row.dimensions.businessId === business.id));
+    (business && row.dimensions.businessId === business.id));
+  const refreshedAt = scoped.reduce<Date | null>((latest, row) => !latest || row.ingestedAt > latest ? row.ingestedAt : latest, null);
   const current = scoped.filter((row) => row.date >= rangeStart && row.date <= rangeEnd);
   const previous = scoped.filter((row) => row.date >= previousStart && row.date < rangeStart);
   const connected = new Map(connectionRows.map((row) => [row.provider, row]));
@@ -214,7 +215,7 @@ export default async function SocialInsightsPage({ searchParams }: { searchParam
           <article><span>Period comparison</span><strong>{change(engagement, total(previous, "engagement"))}</strong><p>Engagement compared with the immediately preceding period.</p></article>
         </section></div>
         <div className="si-content-grid">
-        <section className="si-posts-gallery"><div className="si-gallery-head"><div><span className="si-gallery-icon">▥</span><div><h2>{channel === "all" ? "Social" : CHANNELS.find((item) => item.id === channel)?.label} content</h2><p>{posts.length} posts with synced performance</p></div></div><span className="si-sync-pill">● Performance sync active</span></div>
+        <section className="si-posts-gallery"><div className="si-gallery-head"><div><span className="si-gallery-icon">▥</span><div><h2>{channel === "all" ? "Social" : CHANNELS.find((item) => item.id === channel)?.label} content</h2><p>{posts.length} posts with synced performance</p></div></div><span className="si-sync-pill">{refreshedAt ? `Refreshed ${refreshedAt.toLocaleString("en-US", { timeZone: "UTC" })} UTC` : "Awaiting first sync"}</span></div>
           {posts.length ? <div className="si-post-grid">{posts.map((post) => <article className="si-post-card" key={`${post.source}:${post.id}`}><div className={`si-post-media ${post.source}`}>{post.imageUrl ? <img src={post.imageUrl} alt=""/> : <div className="si-post-media-fallback"><b>{CHANNELS.find((item)=>item.id===post.source)?.mark ?? "↗"}</b><span>View original post</span></div>}<span className="si-post-network">{post.source}</span>{post.url ? <a href={post.url} target="_blank" rel="noreferrer" aria-label="Open original post">↗</a> : null}<time>{post.date.toLocaleDateString("en-US", { month:"short", day:"2-digit", year:"numeric" })}</time></div><div className="si-post-body"><h3>{post.title}</h3><div className="si-post-stats"><span><small>Reach</small><b>{compact(post.values.reach ?? 0)}</b></span><span><small>Engaged</small><b>{compact(post.values.engagement ?? 0)}</b></span></div><div className="si-post-actions"><span>♡ {compact(post.values.likes ?? 0)}</span><span>○ {compact(post.values.comments ?? 0)}</span><span>↗ {compact(post.values.shares ?? 0)}</span>{post.url ? <a href={post.url} target="_blank" rel="noreferrer">View post</a> : null}</div></div></article>)}</div> : <div className="si-inline-empty">Post media is syncing. Keep the worker running, then refresh this page.</div>}</section>
         <aside className="si-top-posts"><div className="si-card-head"><div><h2>Top performing posts</h2><p>Ranked by reach</p></div></div>{topPosts.map((post, index) => <a key={`${post.source}:${post.id}`} href={post.url || "#"} target={post.url ? "_blank" : undefined} rel="noreferrer"><b>{index + 1}</b>{post.imageUrl ? <img src={post.imageUrl} alt=""/> : <span className={`si-rank-placeholder ${post.source}`}>{CHANNELS.find((item)=>item.id===post.source)?.mark}</span>}<span><strong>{post.title}</strong><small>{post.date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}</small></span><em>{compact(post.values.reach ?? 0)}</em></a>)}</aside></div>
         <section className="si-posts-card si-posts-table-legacy"><div className="si-card-head"><div><h2>Post performance</h2><p>{posts.length} posts with synced insights</p></div></div>

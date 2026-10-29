@@ -2,6 +2,7 @@ import type { JSX } from "react";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { eq, desc } from "drizzle-orm";
+import { getClient } from "@/lib/tenant";
 import { getSession } from "@/lib/auth";
 import { db } from "@/lib/services";
 import { workspaces, businesses, businessSources } from "@ob/db";
@@ -78,12 +79,12 @@ export default async function DashLayout({ children }: { children: React.ReactNo
   if (!session) redirect("/signin");
 
   const database = db();
-  const [[workspace], clientRows, sourceRows] = await Promise.all([
+  const [[workspace], clientRows, sourceRows, currentClient] = await Promise.all([
     database.select({
       name: workspaces.name,
       plan: workspaces.plan,
       onboardingCompletedAt: workspaces.onboardingCompletedAt,
-      // Carries the selected client, which the switcher needs.
+      // Onboarding settings remain workspace-wide.
       settings: workspaces.settings,
     })
     .from(workspaces)
@@ -106,6 +107,7 @@ export default async function DashLayout({ children }: { children: React.ReactNo
     .from(businessSources)
     .where(eq(businessSources.workspaceId, session.workspaceId))
     .orderBy(desc(businessSources.createdAt)),
+    getClient(),
   ]);
 
   // A workspace that has not finished onboarding has no business, no profile
@@ -134,7 +136,7 @@ export default async function DashLayout({ children }: { children: React.ReactNo
    * to the switcher, which computed its highlight and its "already selected"
    * guard against a fallback rather than a real selection.
    */
-  const storedId = workspace.settings.onboarding?.businessId;
+  const storedId = currentClient?.id;
   const selectedClient =
     clients.find((client) => client.id === storedId) ?? clients[0] ?? null;
   const selectedId = selectedClient?.id ?? null;
@@ -217,7 +219,7 @@ export default async function DashLayout({ children }: { children: React.ReactNo
       </main>
 
       {/* Floats over every page: the thing it is asked about is usually on screen. */}
-      <Companion />
+      <Companion key={selectedId ?? "no-client"} />
     </div>
   );
 }

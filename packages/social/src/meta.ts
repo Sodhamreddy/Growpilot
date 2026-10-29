@@ -1,3 +1,4 @@
+import { executionSignal } from "@ob/core";
 /**
  * Facebook Page and Instagram Business insights, via the Meta Graph API.
  *
@@ -82,6 +83,7 @@ export interface GraphFailure {
   message: string;
   /** True when reconnecting would not help, e.g. the app is unreviewed. */
   permanent: boolean;
+  outcomeUnknown?: boolean;
 }
 
 /**
@@ -184,10 +186,12 @@ export function describeGraphError(body: unknown): GraphFailure {
 /** Thrown for a Graph response that carried an error envelope. */
 export class GraphError extends Error {
   readonly permanent: boolean;
+  readonly outcomeUnknown: boolean;
   constructor(failure: GraphFailure) {
     super(failure.message);
     this.name = "GraphError";
     this.permanent = failure.permanent;
+    this.outcomeUnknown = failure.outcomeUnknown ?? false;
   }
 }
 
@@ -197,7 +201,7 @@ async function graph<T>(path: string, params: Record<string, string>, fetcher: F
   const url = new URL(`${GRAPH}${path}`);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
 
-  const res = await fetcher(url.toString(), { signal: AbortSignal.timeout(20_000) });
+  const res = await fetcher(url.toString(), { signal: executionSignal(AbortSignal.timeout(20_000)) });
   const body: unknown = await res.json().catch(() => ({}));
 
   // Graph answers 200 with an error envelope in some cases and a 4xx in
@@ -622,15 +626,18 @@ async function graphPost<T>(
 ): Promise<T> {
   let res: Response;
   try {
-    res = await fetcher(`${GRAPH}${path}`, { method: "POST", body, signal: AbortSignal.timeout(timeoutMs) });
+    res = await fetcher(`${GRAPH}${path}`, { method: "POST", body, signal: executionSignal(AbortSignal.timeout(timeoutMs)) });
   } catch (err) {
     if (!final) throw err;
     throw new GraphError({
       message: "Meta did not answer in time, so the post may or may not have gone out. Check the account before trying again.",
-      permanent: true,
+      permanent: true, outcomeUnknown: true,
     });
   }
-  const parsed: unknown = await res.json().catch(() => ({}));
+  const parsed: unknown = await res.json().catch(() => null);
+  if (final && (res.status >= 500 || !parsed || (res.ok && !(parsed as { id?: string }).id))) {
+    throw new GraphError({ message: "Meta returned an uncertain result. Check the account before retrying.", permanent: true, outcomeUnknown: true });
+  }
   if (!res.ok || (parsed as { error?: unknown }).error) throw new GraphError(describePublishError(parsed, res.status));
   return parsed as T;
 }

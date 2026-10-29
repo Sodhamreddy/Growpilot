@@ -85,8 +85,8 @@ export default async function ReviewsPage({
 
   // Business Profile's reviews once there are any; Places' are then duplicates under other ids.
   // The best source with any reviews: Business Profile, then Places, then the Maps page.
-  const source = (["gbp", "places", "maps"] as const).find((s) => rows.some((r) => r.source === s)) ?? "places";
-  const reviews: ReviewItem[] = rows.filter((r) => r.source === source).map((r) => ({
+  const source = (["gbp", "places", "maps", "manual"] as const).find((s) => rows.some((r) => r.source === s)) ?? "places";
+  const reviews: ReviewItem[] = rows.filter((r) => r.source === source || r.source === "manual").map((r) => ({
     id: r.id,
     source: r.source,
     authorName: r.authorName,
@@ -142,6 +142,8 @@ export default async function ReviewsPage({
 
         {business ? (
           <ReviewsWorkspace
+            key={business.id}
+            businessId={business.id}
             businessName={business.name}
             listing={listing}
             reviews={reviews}

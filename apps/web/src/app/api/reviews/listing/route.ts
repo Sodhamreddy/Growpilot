@@ -1,15 +1,15 @@
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { AppError, config, requireRole, type TenantContext } from "@ob/core";
 import { businesses, businessLocations, gmbReviews, repo, type GoogleListing } from "@ob/db";
 import {
-  GoogleApiError, gbpAccessToken, googleCredentials, isMapsLink, listGbpLocations, placeReviews, searchPlaces, syncReviews,
+  listingSelection, GoogleApiError, gbpAccessToken, googleCredentials, isMapsLink, listGbpLocations, placeReviews, searchPlaces,
 } from "@ob/gmb";
 import { route, parseBody } from "@/lib/api";
 import { db } from "@/lib/services";
-import { queueReplyDrafts } from "@/lib/reviews";
+import { queueReviewSync } from "@/lib/reviews";
 
 /**
  * Which Google listing is this client's.
@@ -74,56 +74,61 @@ export const PATCH = route(async (ctx, req) => {
   const creds = googleCredentials(cfg);
   const database = db();
   const business = await currentBusiness(ctx);
-  let listing: GoogleListing = { ...(business.googleListing ?? {}) };
+  let selected: GoogleListing;
 
   if ("mapsLink" in body) {
     if (!isMapsLink(body.mapsLink)) {
       throw new AppError("validation_failed", "That is not a Google Maps link. Open the business on Google Maps, press Share, and copy the link.", { retryable: false });
     }
-    if (listing.mapsLink && listing.mapsLink !== body.mapsLink) {
-      await database.delete(gmbReviews).where(and(eq(gmbReviews.businessId, business.id), eq(gmbReviews.source, "maps")));
-    }
-    listing = { ...listing, mapsLink: body.mapsLink, mapsReadAt: undefined };
+    selected = { mapsLink: body.mapsLink, mapsUri: body.mapsLink };
   } else if ("gbpLocation" in body) {
     // Confirm the account really manages it, rather than trusting an id from the browser.
     const token = await gbpAccessToken(database, ctx, creds).catch(asAppError);
     if (!token) throw new AppError("conflict", "Connect Google first.", { retryable: false });
     const location = (await listGbpLocations(token).catch(asAppError)).find((l) => l.name === body.gbpLocation);
     if (!location) throw new AppError("validation_failed", "That listing is not one this Google account manages.", { retryable: false });
-    listing = {
-      ...listing, gbpLocation: location.name, gbpTitle: location.title,
-      placeId: location.placeId ?? listing.placeId, title: location.title,
-      address: location.address ?? listing.address, mapsUri: location.mapsUri ?? listing.mapsUri,
+    selected = {
+      gbpLocation: location.name, gbpTitle: location.title, title: location.title,
+      ...(location.placeId ? { placeId: location.placeId } : {}),
+      ...(location.address ? { address: location.address } : {}),
+      ...(location.mapsUri ? { mapsUri: location.mapsUri } : {}),
     };
   } else {
     if (!creds.mapsKey) throw new AppError("validation_failed", "Add GOOGLE_MAPS_API_KEY to .env to use Google Maps listings.", { retryable: false });
     const { place } = await placeReviews(creds.mapsKey, body.placeId).catch(asAppError);
-    // A different listing: the old one's reviews and drafts are not this one's.
-    if (listing.placeId && listing.placeId !== place.placeId) {
-      await database.delete(gmbReviews).where(and(eq(gmbReviews.businessId, business.id), eq(gmbReviews.source, "places")));
-    }
-    listing = { ...listing, placeId: place.placeId, title: place.title, address: place.address ?? undefined, mapsUri: place.mapsUri ?? undefined };
+    selected = { placeId: place.placeId, title: place.title,
+      ...(place.address ? { address: place.address } : {}), ...(place.mapsUri ? { mapsUri: place.mapsUri } : {}) };
   }
 
-  await database.update(businesses).set({ googleListing: listing, updatedAt: new Date() })
-    .where(and(eq(businesses.workspaceId, ctx.workspaceId), eq(businesses.id, business.id)));
+  const { listing, changed } = listingSelection(business.googleListing, selected);
+  await database.transaction(async (tx) => {
+    const updated = await tx.update(businesses).set({ googleListing: listing, updatedAt: new Date() })
+      .where(and(eq(businesses.workspaceId, ctx.workspaceId), eq(businesses.id, business.id),
+        (business.googleListing ? sql`${businesses.googleListing} = ${JSON.stringify(business.googleListing)}::jsonb` : sql`${businesses.googleListing} IS NULL`)))
+      .returning({ id: businesses.id });
+    if (!updated.length) throw new AppError("conflict", "The Google listing changed. Refresh and choose it again.", { retryable: false });
+    if (changed) await tx.delete(gmbReviews).where(and(eq(gmbReviews.workspaceId, ctx.workspaceId),
+      eq(gmbReviews.businessId, business.id), ne(gmbReviews.source, "manual")));
+  });
+
   await repo.writeAudit(database, ctx, {
     action: "reviews.listing_selected", entityType: "business", entityId: business.id,
     after: { placeId: listing.placeId, gbpLocation: listing.gbpLocation, mapsLink: listing.mapsLink },
   });
 
-  const result = await syncReviews(database, ctx, { id: business.id, googleListing: listing }, creds, { force: true }).catch(asAppError);
-  const drafting = await queueReplyDrafts(ctx, business.id);
-  return { ok: true, listing: result.listing, added: result.added.length, drafting };
+  const jobId = await queueReviewSync(ctx, business.id);
+  return { ok: true, listing, queued: true, jobId };
 });
 
 export const DELETE = route(async (ctx) => {
   requireRole(ctx, "editor");
   const database = db();
   const business = await currentBusiness(ctx);
-  await database.delete(gmbReviews).where(and(eq(gmbReviews.workspaceId, ctx.workspaceId), eq(gmbReviews.businessId, business.id)));
-  await database.update(businesses).set({ googleListing: null, updatedAt: new Date() })
-    .where(and(eq(businesses.workspaceId, ctx.workspaceId), eq(businesses.id, business.id)));
+  await database.transaction(async (tx) => {
+    await tx.update(businesses).set({ googleListing: null, updatedAt: new Date() })
+      .where(and(eq(businesses.workspaceId, ctx.workspaceId), eq(businesses.id, business.id)));
+    await tx.delete(gmbReviews).where(and(eq(gmbReviews.workspaceId, ctx.workspaceId), eq(gmbReviews.businessId, business.id), ne(gmbReviews.source, "manual")));
+  });
   await repo.writeAudit(database, ctx, { action: "reviews.listing_cleared", entityType: "business", entityId: business.id });
   return { ok: true };
 });

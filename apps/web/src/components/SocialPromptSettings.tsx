@@ -49,10 +49,12 @@ const PLACEHOLDER = {
 } as const;
 
 export function SocialPromptSettings({
+  businessId,
   initial,
   canEdit,
   startOpen = false,
 }: {
+  businessId: string;
   initial: SocialPrompts;
   canEdit: boolean;
   startOpen?: boolean;
@@ -91,7 +93,7 @@ export function SocialPromptSettings({
       const res = await fetch("/api/social/prompts", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...v, wordsToAvoid: wordList }),
+        body: JSON.stringify({ ...v, businessId, wordsToAvoid: wordList }),
       });
       if (!res.ok) {
         const body: unknown = await res.json();

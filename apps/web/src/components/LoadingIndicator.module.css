@@ -1,0 +1,6 @@
+.indicator { display:inline-flex; align-items:center; justify-content:center; gap:8px; max-width:100%; vertical-align:middle; font:inherit; }
+.spinner { display:inline-block; flex-shrink:0; width:16px; height:16px; box-sizing:border-box; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:loading-spin .8s linear infinite; }
+.large { flex-direction:column; gap:12px; }
+.large .spinner { width:30px; height:30px; border-width:3px; }
+@keyframes loading-spin { to { transform:rotate(360deg); } }
+@media(prefers-reduced-motion:reduce) { .spinner { animation:none; } }

@@ -1,3 +1,4 @@
+import { createDatabase } from "./client.js";
 import { config as loadEnv } from "dotenv";
 import { fileURLToPath as envFileURLToPath } from "node:url";
 import { dirname as envDirname, join as envJoin } from "node:path";
@@ -12,7 +13,6 @@ import { readdir, readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
-import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate as drizzleMigrate } from "drizzle-orm/postgres-js/migrator";
 
 /**
@@ -71,7 +71,7 @@ async function main() {
     process.exit(1);
   }
 
-  const sql = postgres(url, { max: 1, onnotice: () => {} });
+  const { sql, db } = createDatabase(url, { max: 1 });
   try {
     console.log("Extensions:");
     await runManual(sql, "pre_");
@@ -81,7 +81,7 @@ async function main() {
       (f) => f.endsWith(".sql") && !f.startsWith("pre_") && !f.startsWith("post_"),
     );
     if (hasGenerated) {
-      await drizzleMigrate(drizzle(sql), { migrationsFolder: MIGRATIONS_DIR });
+      await drizzleMigrate(db, { migrationsFolder: MIGRATIONS_DIR });
       console.log("  applied generated migrations");
     } else {
       console.log("  none found — run `pnpm db:generate` first");

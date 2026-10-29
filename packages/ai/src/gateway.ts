@@ -1,4 +1,4 @@
-import { AppError, type Logger, type TenantContext } from "@ob/core";
+import { AppError, executionSignal, type Logger, type TenantContext } from "@ob/core";
 import type {
   AiProvider, EmbedRequest, GenerateRequest, GenerateResponse, ImageRequest, ImageResponse, ModelBinding,
 } from "./types.js";
@@ -16,6 +16,7 @@ import { routeFor, computeCostMicros, IMAGE_BINDING } from "./registry.js";
  */
 
 export interface AiJobRecord {
+  reservationId?: string | undefined;
   workspaceId: string;
   correlationId: string;
   taskAlias: string;
@@ -33,6 +34,7 @@ export interface AiJobRecord {
 }
 
 export interface GatewayDeps {
+  reserveBudget?(workspaceId: string, estimate: number): Promise<string>;
   providers: Map<string, AiProvider>;
   logger: Logger;
   /** Persists one row per attempt. Must not throw — failures are logged only. */
@@ -71,6 +73,11 @@ export class Gateway {
       }
 
       for (let attempt = 0; attempt < route.maxAttemptsPerBinding; attempt++) {
+        executionSignal().throwIfAborted();
+        const reservationId = await this.#deps.reserveBudget?.(ctx.workspaceId, provider.name === "local" ? 0 : computeCostMicros(binding, {
+          inputTokens: Buffer.byteLength(JSON.stringify(req), "utf8") * 2,
+          outputTokens: req.maxTokens ?? binding.maxTokens,
+        }));
         const started = Date.now();
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), route.timeoutMs);
@@ -79,11 +86,12 @@ export class Gateway {
           const res = await provider.generate(
             { ...req, maxTokens: req.maxTokens ?? binding.maxTokens },
             binding.model,
-            controller.signal,
+            executionSignal(controller.signal),
           );
           const latencyMs = Date.now() - started;
 
           await this.#record({
+            reservationId,
             workspaceId: ctx.workspaceId,
             correlationId: ctx.correlationId,
             taskAlias: req.taskAlias,
@@ -111,6 +119,7 @@ export class Gateway {
           const latencyMs = Date.now() - started;
 
           await this.#record({
+            reservationId: appErr.retryable ? undefined : reservationId,
             workspaceId: ctx.workspaceId,
             correlationId: ctx.correlationId,
             taskAlias: req.taskAlias,
@@ -161,6 +170,7 @@ export class Gateway {
    * kept, so a failure goes back to the person who asked, who can try again.
    */
   async generateImage(ctx: TenantContext, req: ImageRequest): Promise<ImageResponse> {
+    executionSignal().throwIfAborted();
     await this.#assertWithinBudget(ctx.workspaceId, "image_generation");
     const provider = this.#deps.providers.get(IMAGE_BINDING.provider);
     if (!provider?.isConfigured() || !provider.generateImage) {
@@ -171,10 +181,12 @@ export class Gateway {
       );
     }
 
+    const reservationId = await this.#deps.reserveBudget?.(ctx.workspaceId, provider.name === "local" ? 0 : IMAGE_BINDING.costMicrosPerImage);
     const started = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), IMAGE_BINDING.timeoutMs);
     const base = {
+      reservationId,
       workspaceId: ctx.workspaceId,
       correlationId: ctx.correlationId,
       taskAlias: "image_generation",
@@ -183,7 +195,7 @@ export class Gateway {
       attemptIndex: 0,
     };
     try {
-      const res = await provider.generateImage(req, IMAGE_BINDING.model, controller.signal);
+      const res = await provider.generateImage(req, IMAGE_BINDING.model, executionSignal(controller.signal));
       await this.#record({
         ...base,
         provider: res.provider,
@@ -205,6 +217,7 @@ export class Gateway {
         : new AppError("provider_error", "The image request failed.", { cause: err });
       await this.#record({
         ...base,
+        reservationId: appErr.retryable ? undefined : reservationId,
         provider: IMAGE_BINDING.provider,
         model: IMAGE_BINDING.model,
         status: "failed",
@@ -220,17 +233,23 @@ export class Gateway {
 
   /** Embeddings for the knowledge base (spec §4). */
   async embed(ctx: TenantContext, req: EmbedRequest): Promise<{ vectors: number[][]; model: string }> {
+    await this.#assertWithinBudget(ctx.workspaceId, "embedding");
     const route = routeFor("embedding");
     for (const binding of route.chain) {
       const provider = this.#deps.providers.get(binding.provider);
       if (!provider?.isConfigured() || !provider.embed) continue;
+      executionSignal().throwIfAborted();
 
+      const reservationId = await this.#deps.reserveBudget?.(ctx.workspaceId, provider.name === "local" ? 0 : computeCostMicros(binding, {
+        inputTokens: Buffer.byteLength(JSON.stringify(req), "utf8") * 2, outputTokens: 0,
+      }));
       const started = Date.now();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), route.timeoutMs);
       try {
-        const res = await provider.embed(req, binding.model, controller.signal);
+        const res = await provider.embed(req, binding.model, executionSignal(controller.signal));
         await this.#record({
+          reservationId,
           workspaceId: ctx.workspaceId,
           correlationId: ctx.correlationId,
           taskAlias: "embedding",

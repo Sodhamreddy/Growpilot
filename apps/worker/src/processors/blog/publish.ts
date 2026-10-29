@@ -1,8 +1,8 @@
 import { eq, and } from "drizzle-orm";
 import { AppError, open as openSealed, config } from "@ob/core";
-import { articles, publishJobs, integrations, repo } from "@ob/db";
-import { createPost, type WordPressCredential } from "@ob/publish";
-import { assertTransition } from "@ob/pipeline";
+import { articles, publishJobs, integrations, workspaces, repo } from "@ob/db";
+import { wordPressTargetFingerprint, createPost, type WordPressCredential } from "@ob/publish";
+import { assertTransition, canPublish } from "@ob/pipeline";
 import type { WorkerContext } from "../../context.js";
 import { contextFromPayload } from "../../context.js";
 
@@ -72,26 +72,31 @@ export async function processPublish(
     );
   }
 
+  if (job.status === "failed" || job.status === "cancelled") return { externalUrl: job.externalUrl ?? "", status: job.status };
+  if (job.scheduledFor && job.scheduledFor.getTime() > Date.now()) {
+    throw new AppError("conflict", "This publish is not due yet.", { retryable: true });
+  }
   const article = await repo.getArticle(wc.db, ctx, job.entityId);
 
-  // Approval is re-checked here, not trusted from when the job was queued.
-  if (!article.approvedAt) {
-    throw new AppError("forbidden", "This article is no longer approved.", {
-      details: { articleId: article.id, status: article.status },
-      retryable: false,
-    });
+  if (!job.integrationId || job.articleVersion !== article.version) {
+    throw new AppError("conflict", "The article or publishing target changed. Request publication again.", { retryable: false });
   }
-
+  const [workspace] = await wc.db.select().from(workspaces).where(eq(workspaces.id, ctx.workspaceId));
+  const gates = await repo.listGateResults(wc.db, ctx, article.id, article.version);
+  const decision = canPublish(article, workspace?.settings ?? {}, gates);
+  if (!decision.allowed) throw new AppError("forbidden", decision.reasons.join(" "), { retryable: false });
   const [integration] = await wc.db
     .select()
     .from(integrations)
     .where(and(
       eq(integrations.workspaceId, ctx.workspaceId),
       eq(integrations.provider, job.provider),
+      eq(integrations.id, job.integrationId),
+      eq(integrations.scopeKey, article.businessId),
     ))
     .limit(1);
 
-  if (!integration || integration.status !== "connected" || !integration.credentialSealed) {
+  if (!integration || integration.status !== "connected" || !integration.credentialSealed || (integration.expiresAt && integration.expiresAt <= new Date())) {
     throw new AppError(
       "forbidden",
       "The " + job.provider + " connection is not usable. Reconnect it in Integrations.",
@@ -99,11 +104,16 @@ export async function processPublish(
     );
   }
 
-  await wc.db
-    .update(publishJobs)
+  const cred = JSON.parse(openSealed(integration.credentialSealed, config().CREDENTIAL_ENCRYPTION_KEY)) as WordPressCredential;
+  if (job.targetFingerprint !== wordPressTargetFingerprint(cred)) {
+    throw new AppError("conflict", "The WordPress connection changed after scheduling. Review the destination and retry.", { retryable: false });
+  }
+  const [claimed] = await wc.db.update(publishJobs)
     .set({ status: "running", attempts: job.attempts + 1 })
-    .where(eq(publishJobs.id, job.id));
+    .where(and(eq(publishJobs.id, job.id), eq(publishJobs.status, "queued"))).returning({ id: publishJobs.id });
+  if (!claimed) return { externalUrl: "", status: "already_claimed" };
 
+  let externalCompleted = false;
   try {
     if (job.provider !== "wordpress") {
       throw new AppError(
@@ -113,9 +123,6 @@ export async function processPublish(
       );
     }
 
-    const cred = JSON.parse(
-      openSealed(integration.credentialSealed, config().CREDENTIAL_ENCRYPTION_KEY),
-    ) as WordPressCredential;
 
     /*
      * Always a draft, even when a publish date was requested.
@@ -134,6 +141,7 @@ export async function processPublish(
       status: "draft",
     });
 
+    externalCompleted = true;
     await wc.db.transaction(async (tx) => {
       await tx
         .update(publishJobs)
@@ -194,10 +202,10 @@ export async function processPublish(
     await wc.db
       .update(publishJobs)
       .set({
-        status: appErr.retryable ? "queued" : "failed",
+        status: externalCompleted || appErr.details["outcomeUnknown"] ? "running" : appErr.retryable ? "queued" : "failed",
         lastError: appErr.safeMessage.slice(0, 500),
       })
-      .where(eq(publishJobs.id, job.id));
+      .where(and(eq(publishJobs.id, job.id), eq(publishJobs.status, "running")));
 
     await repo.writeAudit(wc.db, ctx, {
       action: "article.publish_failed",

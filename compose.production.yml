@@ -1,0 +1,43 @@
+# Uses managed PostgreSQL + Redis configured in .env.production.
+# Only the web port is exposed. Put an HTTPS reverse proxy in front of it.
+services:
+  web:
+    build:
+      context: .
+      target: web
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      CRAWLER_SERVICE_URL: http://crawler:8787
+      IMAGE_STORE_DIR: /app/.image-store
+    ports: ["127.0.0.1:3002:3002"]
+    volumes: ["post-images:/app/.image-store"]
+    depends_on:
+      crawler:
+        condition: service_healthy
+    restart: unless-stopped
+  worker:
+    build:
+      context: .
+      target: worker
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      CRAWLER_SERVICE_URL: http://crawler:8787
+      IMAGE_STORE_DIR: /app/.image-store
+    volumes: ["post-images:/app/.image-store"]
+    depends_on:
+      crawler:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "--input-type=module", "-e", "import Redis from './apps/worker/node_modules/ioredis/built/index.js'; const r=new Redis(process.env.REDIS_URL,{maxRetriesPerRequest:1}); try { const v=await r.get('worker:heartbeat'); process.exitCode=v?0:1; } catch { process.exitCode=1; } finally { r.disconnect(); }"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+  crawler:
+    build: ./services/crawler
+    restart: unless-stopped
+    shm_size: 1gb
+volumes:
+  post-images:

@@ -1,6 +1,17 @@
-import type { TenantContext } from "@ob/core";
+import { AppError, type TenantContext } from "@ob/core";
 import { JOBS, payloadFrom } from "@ob/jobs";
 import { getQueues } from "./services";
+
+/** Crawl/provider calls run in the worker, beyond a deployment's HTTP timeout. */
+export async function queueReviewSync(ctx: TenantContext, businessId: string): Promise<string> {
+  try {
+    return await getQueues().enqueue("analytics", JOBS.syncReviews, payloadFrom(ctx, { businessId, force: true }), {
+      idempotencyKey: `reviews-sync-request:${businessId}:${ctx.correlationId}:${Date.now()}`,
+    });
+  } catch (err) {
+    throw new AppError("internal", "The listing is saved, but review sync could not be queued. Try Sync now again when the worker connection is available.", { retryable: true, cause: err });
+  }
+}
 
 /**
  * Have the worker draft replies to a client's new reviews.

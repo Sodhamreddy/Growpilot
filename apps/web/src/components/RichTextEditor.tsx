@@ -50,6 +50,8 @@ export function RichTextEditor({
     editable,
     extensions: [
       StarterKit.configure({
+        // Use the explicitly configured link extension below only once.
+        link: false,
         // Headings below h2 have no place in an article body: h1 is the title,
         // and h5/h6 signal a structure nobody reads.
         heading: { levels: [2, 3, 4] },
@@ -114,8 +116,8 @@ function Toolbar({ editor }: { editor: Editor }) {
       // command is meant to act on.
       onMouseDown={(e) => {
         e.preventDefault();
-        run();
       }}
+      onClick={run}
     >
       {label}
     </button>

@@ -3859,18 +3859,7 @@ a.stagecard:hover {
 .intelligence-page .location-item p { margin-top:3px; font-size:10px; }
 
 /* Instant route-transition feedback while server data is loading. */
-.dashboard-loading { width:100%; max-width:1320px; padding:32px clamp(20px,2.2vw,36px); }
-.dashboard-loading i { display:block; border-radius:10px; background:linear-gradient(90deg,#edf1f5 25%,#f8fafc 45%,#edf1f5 65%); background-size:220% 100%; animation:dashboard-shimmer 1.15s ease-in-out infinite; }
-.loading-head { display:grid; gap:10px; margin-bottom:24px; }
-.loading-head i:first-child { width:280px; max-width:62%; height:32px; }
-.loading-head i:last-child { width:520px; max-width:88%; height:14px; }
-.loading-metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:18px; }
-.loading-metrics i { height:92px; border:1px solid #e6ebf1; }
-.loading-panel { display:grid; gap:12px; padding:18px; border:1px solid #e6ebf1; border-radius:14px; background:#fff; }
-.loading-panel i { height:48px; }
-@keyframes dashboard-shimmer { from{background-position:100% 0} to{background-position:-100% 0} }
-@media(prefers-reduced-motion:reduce){.dashboard-loading i{animation:none}}
-@media(max-width:760px){.loading-metrics{grid-template-columns:repeat(2,1fr)}}
+.dashboard-loading { display:grid; place-items:center; width:100%; min-height:320px; padding:32px 20px; color:var(--accent,#4263eb); font-size:14px; }
 
 /* Full-size typography for Settings and Business Intelligence. */
 .settings-hub .settings-head h1 { font-size:30px; }

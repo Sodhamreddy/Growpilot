@@ -63,7 +63,7 @@ export function Companion() {
           currentPath: pathname,
           ...(articleId ? { articleId } : {}),
           // Enough for a follow-up to resolve, not the whole session.
-          history: turns.slice(-6).map((t) => ({ role: t.role, content: t.content })),
+          history: turns.slice(-6).map((t) => ({ role: t.role, content: t.content.slice(0, 1000) })),
         }),
       });
       const body = (await res.json()) as {
@@ -133,7 +133,7 @@ export function Companion() {
             body: JSON.stringify({
               businessId: args["businessId"],
               monthKey: args["month"],
-              mode: "preview",
+              mode: args["previewed"] ? "commit" : "preview",
             }),
           });
           break;
@@ -154,7 +154,22 @@ export function Companion() {
         mark("failed", body.error?.message ?? "That did not work.");
         return;
       }
-      mark("done", "Done.");
+      if (intent === "plan_month" && !args["previewed"]) {
+        const preview = await res.json() as { plan: { slots: { date: string; title: string }[]; warnings: string[] } };
+        const slots = preview.plan.slots;
+        if (!slots.length) {
+          mark("done", "No new posts are available to plan. Add topics or open the calendar to review existing posts.");
+          return;
+        }
+        setTurns((ts) => ts.map((t, i) => i === index ? {
+          ...t,
+          content: `Calendar preview:\n${slots.map((s) => `${s.date}: ${s.title}`).join("\n")}\n${preview.plan.warnings.join("\n")}`,
+          pending: { intent, args: { ...args, previewed: true }, action: "Save this month's plan? Availability will be checked again when saving." },
+        } : t));
+        return;
+      }
+      mark("done", intent === "plan_month" ? "The calendar plan is saved. Posts still need content, approval, and publishing schedules." : "The topic generation request was accepted.");
+      if (intent === "plan_month") router.push(`/social/calendar?month=${encodeURIComponent(String(args["month"]))}`);
       router.refresh();
     } catch {
       mark("failed", "Could not reach the server.");

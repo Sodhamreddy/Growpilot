@@ -15,11 +15,11 @@ export type ArticleStatus =
   | "approved" | "scheduled" | "published" | "failed";
 
 const ALLOWED: Record<ArticleStatus, ArticleStatus[]> = {
-  draft: ["generating", "failed"],
+  draft: ["generating", "qa", "failed"],
   generating: ["qa", "failed", "draft"],
   qa: ["needs_changes", "awaiting_approval", "approved", "failed"],
-  needs_changes: ["generating", "draft", "failed"],
-  awaiting_approval: ["approved", "needs_changes", "failed"],
+  needs_changes: ["generating", "qa", "draft", "failed"],
+  awaiting_approval: ["qa", "approved", "needs_changes", "failed"],
   approved: ["scheduled", "published", "needs_changes"],
   scheduled: ["published", "approved", "failed"],
   published: ["needs_changes"],

@@ -103,3 +103,10 @@ describe("canonicalizeUrl", () => {
     expect(canonicalizeUrl("  https://example.com/x  ")).toBe("https://example.com/x");
   });
 });
+
+
+describe("encoded private addresses", () => {
+  it("blocks hexadecimal mapped IPv4 and the full link-local IPv6 range", () => {
+    for (const ip of ["::ffff:7f00:1", "::ffff:a9fe:a9fe", "fe90::1", "febf::1", "ff02::1"]) expect(isBlockedIp(ip)).toBe(true);
+  });
+});

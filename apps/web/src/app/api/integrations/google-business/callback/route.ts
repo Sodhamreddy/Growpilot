@@ -3,7 +3,7 @@ export const dynamic = "force-dynamic";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { and, eq } from "drizzle-orm";
-import { config, seal } from "@ob/core";
+import { config, seal, hasRole } from "@ob/core";
 import { businesses, integrations, repo } from "@ob/db";
 import {
   GBP_PROVIDER, GBP_SCOPE, GoogleApiError, exchangeGoogleCode, googleCredentials, listGbpLocations,
@@ -12,6 +12,7 @@ import {
 import { requireTenant } from "@/lib/auth";
 import { db } from "@/lib/services";
 import { GBP_STATE_COOKIE } from "@/lib/google-business";
+import { readIntegrationState } from "@/lib/integration-state";
 
 /**
  * GET /api/integrations/google-business/callback — finish the connect.
@@ -31,6 +32,7 @@ function back(reason: string, ok = false): NextResponse {
 
 export async function GET(req: Request): Promise<NextResponse> {
   const ctx = await requireTenant();
+  if (!hasRole(ctx, "admin")) return NextResponse.json({ error: { message: "Only admins can manage connections." } }, { status: 403 });
   const cfg = config();
   const creds = googleCredentials(cfg);
   const params = new URL(req.url).searchParams;
@@ -41,8 +43,10 @@ export async function GET(req: Request): Promise<NextResponse> {
 
   if (params.get("error")) return back(params.get("error") === "access_denied" ? "cancelled" : "failed");
   const state = params.get("state");
-  if (!expected || !state || state !== expected) return back("state_mismatch");
-  if (expected.split(".")[1] !== ctx.workspaceId) return back("wrong_workspace");
+  const binding = readIntegrationState(expected, state, ctx);
+  if (!binding) return back("state_mismatch");
+  const business = binding.businessId ? await repo.getBusiness(db(), ctx, binding.businessId).catch(() => null) : null;
+  if (binding.businessId && !business) return back("state_mismatch");
   const code = params.get("code");
   if (!code) return back("failed");
   if (!creds.clientId || !creds.clientSecret) return back("not_configured");
@@ -87,9 +91,12 @@ export async function GET(req: Request): Promise<NextResponse> {
   if (existing) await database.update(integrations).set(values).where(eq(integrations.id, existing.id));
   else await database.insert(integrations).values({ workspaceId: ctx.workspaceId, provider: GBP_PROVIDER, ...values });
 
-  // One listing is this client's listing; with several, the person chooses on the page.
-  const business = await repo.getPrimaryBusiness(database, ctx);
-  if (business && locations.length === 1 && !business.googleListing?.gbpLocation) {
+  // A single result may be assigned only when there is no saved listing, or
+  // when its Place ID proves it is the same one. A saved Maps link may identify
+  // a different business; leave that change to explicit listing selection.
+  const soleLocation = locations.length === 1 ? locations[0] : undefined;
+  const sameListing = business?.googleListing?.placeId && business.googleListing.placeId === soleLocation?.placeId;
+  if (business && soleLocation && !business.googleListing?.gbpLocation && (!business.googleListing || sameListing)) {
     const l = locations[0]!;
     await database.update(businesses).set({
       googleListing: {

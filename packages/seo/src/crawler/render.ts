@@ -1,4 +1,4 @@
-import { AppError } from "@ob/core";
+import { AppError, executionSignal } from "@ob/core";
 
 /**
  * Client for the Crawl4AI rendering service — see services/crawler.
@@ -47,7 +47,7 @@ export async function renderingHealthy(serviceUrl: string, timeoutMs = 2_000): P
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(new URL("/health", serviceUrl), { signal: controller.signal });
+    const res = await fetch(new URL("/health", serviceUrl), { signal: executionSignal(controller.signal) });
     if (!res.ok) return false;
     const body = (await res.json()) as { ok?: boolean };
     return body.ok === true;
@@ -60,10 +60,7 @@ export async function renderingHealthy(serviceUrl: string, timeoutMs = 2_000): P
 
 export async function renderPage(url: string, opts: RenderOptions): Promise<RenderedPage> {
   const timeoutMs = opts.timeoutMs ?? 30_000;
-  const controller = new AbortController();
-  // The browser has its own page timeout; this one guards the HTTP hop, so it
-  // is deliberately longer than the timeout we ask the service to apply.
-  const timer = setTimeout(() => controller.abort(), timeoutMs + 5_000);
+  const signal = executionSignal(AbortSignal.timeout(timeoutMs + 5_000));
 
   let res: Response;
   try {
@@ -75,7 +72,7 @@ export async function renderPage(url: string, opts: RenderOptions): Promise<Rend
         timeout_ms: timeoutMs,
         settle_ms: opts.settleMs ?? 1_200,
       }),
-      signal: controller.signal,
+      signal,
     });
   } catch (err) {
     throw new AppError(
@@ -83,8 +80,6 @@ export async function renderPage(url: string, opts: RenderOptions): Promise<Rend
       "The rendering service is not reachable.",
       { cause: err, details: { serviceUrl: opts.serviceUrl }, retryable: true },
     );
-  } finally {
-    clearTimeout(timer);
   }
 
   if (!res.ok) {

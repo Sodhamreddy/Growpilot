@@ -39,7 +39,7 @@ const schema = z.object({
 
 export const PATCH = route(async (ctx, req) => {
   requireRole(ctx, "editor");
-  const body = await parseBody(req, schema);
+  const body = await parseBody(req, schema, { maxBytes: 8 * 1024 * 1024 });
   const database = db();
 
   const before = await repo.getBusiness(database, ctx, body.businessId);

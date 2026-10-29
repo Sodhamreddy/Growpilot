@@ -4,10 +4,11 @@ import { eq, and, gte, desc, sql } from "drizzle-orm";
 import { requireTenant, getSession } from "@/lib/auth";
 import { db } from "@/lib/services";
 import {
-  workspaces, businessSources, articles, aiJobs, auditLogs,
+  workspaces, businessSources, articles, aiJobs, aiReservations, auditLogs,
   socialTopics, socialCategories, repo,
 } from "@ob/db";
 import { TopBar } from "@/components/TopBar";
+import { JobActivity } from "@/components/JobActivity";
 import {
   IconArticles, IconSocial, IconLocal, IconSpark, IconArrow, IconInbox,
   IconClock, IconCheck, IconIntegrations, IconAnalytics,
@@ -90,6 +91,9 @@ export default async function HomePage() {
 
   const spentUsd = Number(usage[0]?.costMicros ?? 0) / 1_000_000;
   const budgetUsd = (workspace?.aiBudgetMicros ?? 0) / 1_000_000;
+  const [held] = await database.select({ total: sql<string>`coalesce(sum(${aiReservations.costMicros}), 0)` })
+    .from(aiReservations).where(and(eq(aiReservations.workspaceId, ctx.workspaceId), gte(aiReservations.createdAt, monthStart)));
+  const reservedUsd = Number(held?.total ?? 0) / 1_000_000;
   const budgetPct = budgetUsd > 0 ? Math.min(100, (spentUsd / budgetUsd) * 100) : 0;
 
   const isSeeded = business?.name === "Northside Dental";
@@ -210,10 +214,13 @@ export default async function HomePage() {
                 sub="Live content" tone="ok"
                 href="/articles?status=published" icon={<IconCheck size={16} />} />
           <Stat label="AI spend" value={`$${spentUsd.toFixed(2)}`}
-                sub={budgetUsd > 0 ? `${budgetPct.toFixed(0)}% of budget` : "No ceiling set"}
+                sub={`${budgetUsd > 0 ? `${budgetPct.toFixed(0)}% of budget` : "No ceiling set"} · $${reservedUsd.toFixed(2)} reserved`}
                 tone={budgetPct > 90 ? "fail" : budgetPct > 70 ? "warn" : "ok"}
                 href="/preferences" icon={<IconAnalytics size={16} />} />
         </div>
+
+        {reservedUsd > 0 ? <p className="small muted">Reserved AI costs cover work in progress or calls whose final cost is awaiting confirmation. They count toward the spending limit.</p> : null}
+        <JobActivity />
 
         {/* ── What has been happening ── */}
         <div className="sectionhead">

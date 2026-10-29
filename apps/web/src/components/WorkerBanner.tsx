@@ -44,8 +44,7 @@ export function WorkerBanner() {
           {state.queued} job{state.queued === 1 ? "" : "s"} waiting, but the worker is not running
         </strong>
         <span>
-          Crawling, extraction and article generation all run in a separate process. Start it with{" "}
-          <code>pnpm dev:worker</code> and queued work resumes automatically — nothing is lost.
+          Background processing is unavailable. Contact your workspace administrator to restore the service. Queued tasks will resume when it reconnects.
         </span>
       </div>
     </div>

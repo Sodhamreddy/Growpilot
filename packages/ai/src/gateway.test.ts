@@ -250,3 +250,21 @@ describe("Gateway — observability (spec §14.1)", () => {
     await expect(g.generate(ctx, request)).resolves.toBeDefined();
   });
 });
+
+describe("budget reservation before provider work", () => {
+  it("never invokes a provider when the atomic reservation rejects", async () => {
+    const provider = stubProvider("anthropic");
+    const g = new Gateway(deps(new Map([["anthropic", provider]]), { reserveBudget: async () => { throw new AppError("budget_exceeded", "Budget held by another job."); } }));
+    await expect(g.generate(ctx, request)).rejects.toMatchObject({ code: "budget_exceeded" });
+    expect(provider.generate).not.toHaveBeenCalled();
+  });
+  it("reserves embedding cost and passes the reservation into usage settlement", async () => {
+    const reserveBudget = vi.fn(async () => "reservation-1");
+    const recordJob = vi.fn(async () => {});
+    const provider = stubProvider("google", { embed: async () => ({ vectors: [[1]], model: "test", provider: "google", usage: { inputTokens: 10, outputTokens: 0 } }) });
+    const g = new Gateway(deps(new Map([["google", provider]]), { reserveBudget, recordJob }));
+    await g.embed(ctx, { texts: ["embedding input"] });
+    expect(reserveBudget.mock.calls[0]![1]).toBeGreaterThan(0);
+    expect(recordJob).toHaveBeenCalledWith(expect.objectContaining({ reservationId: "reservation-1", taskAlias: "embedding" }));
+  });
+});

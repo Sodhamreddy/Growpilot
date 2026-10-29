@@ -1,3 +1,4 @@
+import { processMeasurement, sweepMeasurements } from "./processors/blog/measurement.js";
 import { config as loadEnv } from "dotenv";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -10,7 +11,7 @@ loadEnv({
 });
 
 import { Worker, type Job } from "bullmq";
-import { AppError, toAppError } from "@ob/core";
+import { AppError, toAppError, withExecutionSignal } from "@ob/core";
 import { JOBS, QUEUE_CONFIG, QUEUE_NAMES, type QueueName, type JobPayload } from "@ob/jobs";
 import { createWorkerContext, type WorkerContext } from "./context.js";
 /*
@@ -31,7 +32,7 @@ import {
 import { processResearchKeywords, type ResearchPayload } from "./processors/blog/research.js";
 import { processBuildContentPlan, type PlanPayload } from "./processors/blog/plan.js";
 import { processPublish, type PublishPayload } from "./processors/blog/publish.js";
-import { processSocialInsights } from "./processors/social/insights.js";
+import { processSocialInsights, processSocialInsightsSweep } from "./processors/social/insights.js";
 import { processPublishSocialPost } from "./processors/social/publish.js";
 import { processReviewsSync, processReviewsSweep, scheduleReviewsSweep } from "./processors/gmb/reviews.js";
 import {
@@ -49,6 +50,8 @@ import {
 type Processor = (wc: WorkerContext, payload: never, signal: AbortSignal) => Promise<unknown>;
 
 const PROCESSORS: Record<string, Processor> = {
+  "analytics.measurement": processMeasurement as Processor,
+  "maintenance.measurement": sweepMeasurements as Processor,
   [JOBS.crawlSite]: processCrawlSite as Processor,
   [JOBS.extractProfile]: processExtractProfile as Processor,
   [JOBS.extractVoice]: processExtractVoice as Processor,
@@ -64,6 +67,7 @@ const PROCESSORS: Record<string, Processor> = {
   // The job name has existed since the queues were defined; this is the
   // processor it was reserved for.
   [JOBS.ingestMetrics]: processSocialInsights as Processor,
+  [JOBS.socialInsightsSweep]: processSocialInsightsSweep as Processor,
   [JOBS.publishSocialPost]: processPublishSocialPost as Processor,
 };
 
@@ -103,8 +107,14 @@ async function markJobEntityFailed(
   payload: JobPayload,
   reason: string,
 ): Promise<void> {
-  const { businessSources, articles } = await import("@ob/db");
+  const { businessSources, articles, publishJobs } = await import("@ob/db");
   const { eq, and, inArray } = await import("drizzle-orm");
+
+  if (jobName === JOBS.publishArticle && typeof payload["publishJobId"] === "string") {
+    await wc.db.update(publishJobs).set({ status: "failed", lastError: reason.slice(0, 500) })
+      .where(and(eq(publishJobs.workspaceId, payload.workspaceId), eq(publishJobs.id, payload["publishJobId"]), eq(publishJobs.status, "queued")));
+    return;
+  }
 
   if ([JOBS.crawlSite, JOBS.extractProfile, JOBS.extractVoice, JOBS.indexKnowledge].some((name) => name === jobName) && typeof payload["sourceId"] === "string") {
     await wc.db
@@ -202,11 +212,39 @@ async function main(): Promise<void> {
    * that are configured but firing nowhere.
    */
   await restoreSchedules(wc);
+  await wc.queues.schedule("maintenance", "maintenance.measurement", { workspaceId: "system", userId: "system", correlationId: "measurement-sweep" }, { key: "measurement-sweep", cron: "0 4 * * *", timezone: "UTC" });
+  await wc.queues.schedule("maintenance", JOBS.socialInsightsSweep, { workspaceId: "system", userId: "system", correlationId: "social-insights-sweep" }, { key: "social-insights-sweep", cron: "30 2 * * *", timezone: "UTC" });
   try {
     await scheduleReviewsSweep(wc);
   } catch (err) {
     wc.logger.error("Could not schedule the reviews sweep", { error: String(err) });
   }
+
+  let dispatching = false;
+  const dispatchPending = async () => {
+    if (dispatching) return;
+    dispatching = true;
+    try {
+      const { publishJobs, socialTopics } = await import("@ob/db");
+      const { and, eq, or, isNull, lte, sql } = await import("drizzle-orm");
+      const rows = await wc.db.select().from(publishJobs).where(and(eq(publishJobs.status, "queued"),
+        or(isNull(publishJobs.scheduledFor), lte(publishJobs.scheduledFor, new Date())))).limit(100);
+      for (const row of rows) {
+        await wc.queues.enqueue("publish", JOBS.publishArticle, { workspaceId: row.workspaceId, userId: "system",
+          correlationId: `outbox-${row.id}`, publishJobId: row.id }, { idempotencyKey: `publish-job:${row.id}` });
+      }
+      const social = await wc.db.select({ id: socialTopics.id, workspaceId: socialTopics.workspaceId, pack: socialTopics.pack }).from(socialTopics)
+        .where(sql`${socialTopics.pack}->'schedule'->>'status' = 'scheduled' and (${socialTopics.pack}->'schedule'->>'at')::timestamptz <= now()`).limit(100);
+      for (const row of social) {
+        const at = row.pack!.schedule!.at;
+        await wc.queues.enqueue("publish", JOBS.publishSocialPost, { workspaceId: row.workspaceId, userId: "system", correlationId: `outbox-${row.id}`, topicId: row.id, at },
+          { idempotencyKey: `social-post:${row.id}:${Date.parse(at)}` });
+      }
+    } catch (err) { wc.logger.error("Publish dispatch failed", { error: String(err) }); }
+    finally { dispatching = false; }
+  };
+  void dispatchPending();
+  const dispatchTimer = setInterval(() => void dispatchPending(), 30_000);
 
   const workers: Worker[] = [];
 
@@ -239,7 +277,7 @@ async function main(): Promise<void> {
 
         try {
           log.info("Job started");
-          const result = await processor(wc, job.data as never, controller.signal);
+          const result = await withExecutionSignal(controller.signal, () => processor(wc, job.data as never, controller.signal));
           log.info("Job succeeded", { durationMs: Date.now() - started });
           return result;
         } catch (err) {
@@ -278,7 +316,7 @@ async function main(): Promise<void> {
 
     worker.on("failed", (job, err) => {
       if (!job) return;
-      const exhausted = job.attemptsMade >= (job.opts.attempts ?? 1);
+      const exhausted = job.attemptsMade >= (job.opts.attempts ?? 1) || (err instanceof AppError && !err.retryable);
       if (exhausted) {
         /*
          * Close out any row the job was tracking.
@@ -344,6 +382,7 @@ async function main(): Promise<void> {
     wc.logger.info("Shutting down", { signal });
 
     clearInterval(heartbeat);
+    clearInterval(dispatchTimer);
     await wc.redis.del("worker:heartbeat").catch(() => {});
     await Promise.all(workers.map((w) => w.close()));
     await wc.queues.close();

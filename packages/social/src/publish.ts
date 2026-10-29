@@ -63,6 +63,7 @@ export function postText(pack: SocialContentPack): string {
 export interface PublishDeps {
   facebook: (message: string) => Promise<PublishResult>;
   instagram: (caption: string) => Promise<PublishResult>;
+  checkpoint?: (schedule: PackSchedule) => Promise<void>;
   now?: () => Date;
 }
 
@@ -94,6 +95,12 @@ export async function publishScheduled(
       const res = await (network === "facebook" ? deps.facebook(text) : deps.instagram(text));
       results[network] = { status: "published", id: res.id, url: res.url, at: now() };
     } catch (err) {
+      if (err instanceof GraphError && err.outcomeUnknown) {
+        results[network] = { status: "failed", error: err.message, at: now() };
+        const uncertain: PackSchedule = { ...schedule, results, status: "publishing" };
+        await deps.checkpoint?.(uncertain);
+        return { schedule: uncertain, retry: false };
+      }
       const permanent = err instanceof GraphError ? err.permanent : false;
       if (!permanent) retry = true;
       results[network] = {
@@ -102,6 +109,8 @@ export async function publishScheduled(
         at: now(),
       };
     }
+    // A persistence failure must stop before the next network is called.
+    await deps.checkpoint?.({ ...schedule, results: { ...results }, status: "publishing" });
   }
 
   const outcomes = schedule.networks.map((n: SocialNetworkId) => results[n]?.status);

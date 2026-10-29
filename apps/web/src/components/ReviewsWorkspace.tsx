@@ -69,8 +69,9 @@ function Ago({ iso }: { iso: string }) {
 }
 
 export function ReviewsWorkspace({
-  businessName, listing, reviews: initial, source, google, placesConfigured, crawlerConfigured, hasVoice, keywords, canEdit, canConnect,
+  businessId, businessName, listing, reviews: initial, source, google, placesConfigured, crawlerConfigured, hasVoice, keywords, canEdit, canConnect,
 }: {
+  businessId: string;
   businessName: string;
   listing: GoogleListing | null;
   reviews: ReviewItem[];
@@ -87,17 +88,35 @@ export function ReviewsWorkspace({
   const [reviews, setReviews] = useState(initial);
   useEffect(() => setReviews(initial), [initial]);
   const [filter, setFilter] = useState<Filter>("open");
+  const [search, setSearch] = useState("");
+  const [rating, setRating] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncNote, setSyncNote] = useState<string | null>(null);
   const [picking, setPicking] = useState(!listing?.placeId && !listing?.gbpLocation && !listing?.mapsLink);
-  /** Refreshes left while the worker drafts replies. */
-  const [polls, setPolls] = useState(0);
-
+  const [syncJob, setSyncJob] = useState<string | null>(null);
   useEffect(() => {
-    if (polls <= 0) return;
-    const t = window.setTimeout(() => { router.refresh(); setPolls((n) => n - 1); }, 5000);
-    return () => window.clearTimeout(t);
-  }, [polls, router]);
+    if (!syncJob) return;
+    let alive = true;
+    let checks = 0;
+    const timer = window.setInterval(() => {
+      if (++checks > 90) {
+        setSyncJob(null); setSyncing(false);
+        setSyncNote("This sync is taking longer than expected. The worker can continue; refresh the page to check the result.");
+        return;
+      }
+      void call<{ state: string; result?: { added?: number; drafted?: number }; error?: string }>(`/api/reviews/sync?jobId=${encodeURIComponent(syncJob)}`, "GET")
+        .then((res) => {
+          if (!alive) return;
+          if (res.state === "completed" || res.state === "failed") {
+            setSyncJob(null); setSyncing(false); router.refresh();
+            setSyncNote(res.state === "failed" ? res.error ?? "Sync failed. Try again." : `Sync finished. ${res.result?.added ?? 0} new reviews, ${res.result?.drafted ?? 0} replies drafted. Check any listing connection message below.`);
+          } else setSyncNote(res.state === "active" ? "Reading reviews and preparing reply drafts…" : "Review sync queued. Waiting for the worker…");
+        }).catch(() => { if (alive) setSyncNote("Could not check sync progress. The worker can continue; refresh this page shortly."); });
+    }, 5000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [syncJob, router]);
+
+
 
   const gbpReady = source === "gbp" && google.connected && listing?.gbpStatus === "ok";
   const counts = {
@@ -106,18 +125,17 @@ export function ReviewsWorkspace({
     replied: reviews.filter(replied).length,
   };
   const shown = reviews.filter((r) =>
-    filter === "all" ? true : filter === "open" ? !replied(r) : filter === "drafted" ? drafted(r) : replied(r));
+    filter === "all" ? true : filter === "open" ? !replied(r) : filter === "drafted" ? drafted(r) : replied(r))
+    .filter((r) => !rating || r.rating === Number(rating))
+    .filter((r) => !search.trim() || `${r.authorName} ${r.comment ?? ""}`.toLowerCase().includes(search.trim().toLowerCase()));
 
   async function sync() {
     setSyncing(true);
     setSyncNote(null);
     try {
-      const res = await call<{ added: number; source: ReviewSource | null; drafting: boolean; listing: GoogleListing }>("/api/reviews/sync", "POST");
-      setSyncNote(res.source
-        ? `${res.added ? `${res.added} new review${res.added === 1 ? "" : "s"}` : "No new reviews"}${res.drafting && res.added ? ". Drafting replies…" : "."}`
-        : res.listing.lastError ?? "Nothing could be read.");
-      if (res.drafting) setPolls(6);
-      router.refresh();
+      const res = await call<{ jobId: string }>("/api/reviews/sync", "POST");
+      setSyncJob(res.jobId);
+      setSyncNote("Review sync queued. You can keep working while it runs.");
     } catch (err) {
       setSyncNote(err instanceof Error ? err.message : "Could not reach the server.");
     } finally {
@@ -148,7 +166,7 @@ export function ReviewsWorkspace({
         <Metric tone="blue" icon={<IconInbox />} value={source ? String(counts.open) : "n/a"} label="Need a reply"
                 note={source ? `of ${reviews.length} read` : "Not reading yet"} />
         <Metric tone="green" icon={<IconCheck />} value={source ? String(counts.replied) : "n/a"} label="Replied"
-                note={source === "places" ? "Places cannot see replies made on Google" : source ? "On Google" : "Not reading yet"} />
+                note={source === "places" ? "Places cannot see replies made on Google" : source === "manual" ? "Marked as posted by your team" : source ? "On Google" : "Not reading yet"} />
         <Metric tone="orange" icon={<IconClock />} value={source ? String(counts.drafted) : "n/a"} label="Drafts to check" note="Waiting for a person" />
         <Metric tone="gold" icon={<span>☆</span>}
                 value={typeof listing?.rating === "number" ? listing.rating.toFixed(1) : "n/a"} label="Average rating"
@@ -179,24 +197,26 @@ export function ReviewsWorkspace({
             canEdit={canEdit}
             open={picking}
             onOpen={setPicking}
-            onChosen={(drafting) => { setPicking(false); if (drafting) setPolls(6); router.refresh(); }}
+            onChosen={(jobId) => { setPicking(false); setSyncJob(jobId); setSyncing(true); setSyncNote("Listing saved. Review sync queued."); router.refresh(); }}
           />
+
+          {canEdit ? <ManualReviews businessId={businessId} onAdded={() => router.refresh()} /> : null}
 
           <section id="recent-reviews" className="recent-reviews">
             <div className="reviews-section-title rv-titlebar">
               <h2>Reviews</h2>
               <span>
-                {source === "gbp" ? "From Google Business Profile" : source === "places" ? "Latest 5, from Google Maps (Places API)" : source === "maps" ? "Newest, read from the Google Maps page" : "Not reading yet"}
+                {source === "gbp" ? "From Google Business Profile" : source === "places" ? "Latest 5, from Google Maps (Places API)" : source === "maps" ? "Newest, read from the Google Maps page" : source === "manual" ? "Manually added reviews" : "Not reading yet"}
                 {listing?.syncedAt ? <> · synced <Ago iso={listing.syncedAt} /></> : null}
               </span>
               {canEdit && (listing?.placeId || listing?.gbpLocation || listing?.mapsLink) ? (
-                <button type="button" className="btn small" disabled={syncing} onClick={() => void sync()}>
-                  {syncing ? "Syncing…" : "Sync now"}
+                <button type="button" className="btn small" disabled={syncing || Boolean(syncJob)} onClick={() => void sync()}>
+                  {syncing || syncJob ? "Syncing…" : "Sync now"}
                 </button>
               ) : null}
             </div>
-            {syncNote ? <p className="rv-note" role="status">{syncNote}{polls > 0 ? " Checking for drafts…" : ""}</p> : null}
-            {listing?.lastError && !source ? <p className="rv-error">{listing.lastError}</p> : null}
+            {syncNote ? <p className="rv-note" role="status">{syncNote}</p> : null}
+            {listing?.lastError ? <p className="rv-error">{listing.lastError}</p> : null}
             {source === "maps" ? (
               <p className="rv-hint">
                 Read from the listing&apos;s public Google Maps page about once a day, so dates are approximate. Replies are copied here and
@@ -212,6 +232,13 @@ export function ReviewsWorkspace({
 
             {reviews.length ? (
               <>
+                <div className="rv-search">
+                  <input type="search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search reviewer or review text" aria-label="Search reviews" />
+                  <select value={rating} onChange={(e) => setRating(e.target.value)} aria-label="Filter by rating">
+                    <option value="">All ratings</option>
+                    {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n} stars</option>)}
+                  </select>
+                </div>
                 <div className="rv-filters" role="tablist" aria-label="Filter reviews">
                   {([["open", `Need a reply (${counts.open})`], ["drafted", `Drafts (${counts.drafted})`], ["replied", `Replied (${counts.replied})`], ["all", `All (${reviews.length})`]] as const).map(([key, label]) => (
                     <button key={key} type="button" role="tab" aria-selected={filter === key} className={filter === key ? "on" : ""} onClick={() => setFilter(key)}>
@@ -222,7 +249,7 @@ export function ReviewsWorkspace({
                 <ul className="rv-list">
                   {shown.map((r) => (
                     <ReviewCard key={r.id} review={r} canEdit={canEdit} canPost={gbpReady && r.source === "gbp"}
-                                mapsUri={listing?.mapsUri ?? null} onChange={(patch) => update(r.id, patch)} />
+                                mapsUri={listing?.mapsUri ?? listing?.mapsLink ?? null} onChange={(patch) => update(r.id, patch)} />
                   ))}
                   {shown.length === 0 ? <li className="rv-none">Nothing here.</li> : null}
                 </ul>
@@ -266,6 +293,48 @@ export function ReviewsWorkspace({
       </div>
     </>
   );
+}
+
+function ManualReviews({ businessId, onAdded }: { businessId: string; onAdded: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  async function submit(body: unknown) {
+    setBusy(true); setNote(null);
+    try {
+      const result = await call<{ added: number; skipped: number }>("/api/reviews/manual", "POST", body);
+      setNote(`${result.added} added, ${result.skipped} duplicates skipped.`);
+      onAdded();
+      return true;
+    } catch (err) { setNote(err instanceof Error ? err.message : "Could not save reviews."); return false; }
+    finally { setBusy(false); }
+  }
+  return <details className="rv-picker">
+    <summary>Add or import reviews without an API</summary>
+    <p className="rv-hint">Add real reviews for this client. These are labelled as manually added. Replies are copied to Google and marked as posted by your team.</p>
+    <form onSubmit={(event) => {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const fields = new FormData(form);
+      void submit({ businessId, review: Object.fromEntries(fields.entries()) }).then((ok) => { if (ok) form.reset(); });
+    }}>
+      <div className="rv-search">
+        <label>Reviewer<input name="authorName" required maxLength={200} disabled={busy} /></label>
+        <label>Rating<select name="rating" defaultValue="5" disabled={busy}>{[5, 4, 3, 2, 1].map((n) => <option key={n} value={n}>{n} stars</option>)}</select></label>
+        <label>Review date<input name="publishedAt" type="date" required disabled={busy} /></label>
+      </div>
+      <label>Review text<textarea name="comment" rows={3} maxLength={10000} disabled={busy} /></label>
+      <label>Review link (optional)<input name="reviewUrl" type="url" placeholder="https://…" disabled={busy} /></label>
+      <button className="btn small primary" type="submit" disabled={busy}>{busy ? "Saving…" : "Add review"}</button>
+    </form>
+    <p className="rv-hint">Import up to 200 reviews from CSV. Columns: authorName, rating, publishedAt (YYYY-MM-DD), comment, reviewUrl. Reimporting the same review keeps its existing reply.</p>
+    <label>Import CSV<input type="file" accept=".csv,text/csv" disabled={busy} onChange={(event) => {
+      const file = event.target.files?.[0]; event.target.value = "";
+      if (!file) return;
+      if (file.size > 1_000_000) { setNote("The CSV must be smaller than 1 MB."); return; }
+      void file.text().then((csv) => submit({ businessId, csv })).catch(() => setNote("Could not read that file."));
+    }} /></label>
+    {note ? <p className="rv-note" role="status">{note}</p> : null}
+  </details>;
 }
 
 function Metric({ tone, icon, value, label, note }: { tone: string; icon: React.ReactNode; value: string; label: string; note: string }) {
@@ -330,7 +399,7 @@ function ListingPanel({
   canEdit: boolean;
   open: boolean;
   onOpen: (open: boolean) => void;
-  onChosen: (drafting: boolean) => void;
+  onChosen: (jobId: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [places, setPlaces] = useState<PlaceRow[] | null>(null);
@@ -339,6 +408,7 @@ function ListingPanel({
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [link, setLink] = useState(listing?.mapsLink ?? "");
+  useEffect(() => setLink(listing?.mapsLink ?? ""), [listing?.mapsLink]);
 
   async function search(q: string) {
     setBusy("search");
@@ -363,15 +433,14 @@ function ListingPanel({
         .catch((err: unknown) => { setGbp([]); setGbpError(err instanceof Error ? err.message : null); });
     }
     // Only when the panel opens.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   async function choose(body: { placeId: string } | { gbpLocation: string } | { mapsLink: string }) {
     setBusy("choose");
     setError(null);
     try {
-      const res = await call<{ drafting: boolean }>("/api/reviews/listing", "PATCH", body);
-      onChosen(res.drafting);
+      const res = await call<{ jobId: string }>("/api/reviews/listing", "PATCH", body);
+      onChosen(res.jobId);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not save that.");
     } finally {
@@ -402,6 +471,7 @@ function ListingPanel({
         <div>
           <h3>Which Google listing is {businessName}&apos;s?</h3>
           <p>Pick it yourself: names are shared, and a reply to the wrong business&apos;s review is public.</p>
+          {chosen ? <p className="rv-hint">Choosing a different listing replaces its previously synced reviews and saved reply drafts. Manually added reviews stay with this client.</p> : null}
         </div>
         {chosen ? <button type="button" className="socal-pop-close" aria-label="Close" onClick={() => onOpen(false)}>×</button> : null}
       </div>
@@ -415,7 +485,7 @@ function ListingPanel({
         <form className="rv-search" onSubmit={(e) => { e.preventDefault(); void choose({ mapsLink: link.trim() }); }}>
           <input value={link} onChange={(e) => setLink(e.target.value)} placeholder="https://maps.app.goo.gl/…" aria-label="Google Maps link" inputMode="url" />
           <button type="submit" className="btn small primary" disabled={!canEdit || !!busy || !link.trim() || !crawlerConfigured}>
-            {busy === "choose" ? "Reading reviews… (up to a minute)" : "Read reviews"}
+            {busy === "choose" ? "Saving…" : "Save & sync reviews"}
           </button>
         </form>
         {!crawlerConfigured ? <p className="rv-hint">Set <code>CRAWLER_SERVICE_URL</code> in .env and start the browser crawler to read Maps links.</p> : null}
@@ -484,6 +554,17 @@ function ReviewCard({ review, canEdit, canPost, mapsUri, onChange }: {
   const [copied, setCopied] = useState(false);
   // Google's photo links expire; a dead one falls back to the initial.
   const [photoOk, setPhotoOk] = useState(true);
+  const storageKey = `review-draft:${review.id}`;
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(storageKey) ?? "null") as { text: string; revision: string | null } | null;
+      if (!posted(review) && saved?.revision === (review.draft?.updatedAt ?? null)) setText(saved.text);
+    } catch { /* Draft saving still works when browser storage is unavailable. */ }
+  }, [storageKey]);
+  function editReply(value: string) {
+    setText(value);
+    try { sessionStorage.setItem(storageKey, JSON.stringify({ text: value, revision: review.draft?.updatedAt ?? null })); } catch { /* optional recovery */ }
+  }
   // A draft that lands from the worker fills the box, unless someone has typed.
   useEffect(() => { setText((t) => (t.trim() ? t : review.draft?.body ?? "")); }, [review.draft?.body]);
 
@@ -498,6 +579,7 @@ function ReviewCard({ review, canEdit, canPost, mapsUri, onChange }: {
         `/api/reviews/${review.id}`, "PATCH", action === "draft" ? { action } : { action, body: text },
       );
       if (action === "draft") setText(res.draft.body);
+      try { sessionStorage.removeItem(storageKey); } catch { /* optional recovery */ }
       onChange({ draft: res.draft, ...(res.googleReply !== undefined ? { googleReply: res.googleReply } : {}) });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not reach the server.");
@@ -508,6 +590,7 @@ function ReviewCard({ review, canEdit, canPost, mapsUri, onChange }: {
 
   async function copyAndOpen() {
     try {
+      if (dirty) await act("save");
       await navigator.clipboard.writeText(text);
       setCopied(true);
       setTimeout(() => setCopied(false), 2500);
@@ -520,7 +603,6 @@ function ReviewCard({ review, canEdit, canPost, mapsUri, onChange }: {
       <div className="rv-head">
         <span className="rv-avatar" aria-hidden>
           {review.authorPhotoUrl && photoOk
-            // eslint-disable-next-line @next/next/no-img-element
             ? <img src={review.authorPhotoUrl} alt="" referrerPolicy="no-referrer" onError={() => setPhotoOk(false)} />
             : review.authorName.slice(0, 1).toUpperCase()}
         </span>
@@ -536,6 +618,7 @@ function ReviewCard({ review, canEdit, canPost, mapsUri, onChange }: {
         </span>
       </div>
 
+      <small>{review.source === "manual" ? "Manually added · not verified by Google" : review.source === "gbp" ? "Google Business Profile" : review.source === "places" ? "Google Places" : "Google Maps page"}</small>
       <p className={`rv-text${review.comment ? "" : " empty"}`}>{review.comment ?? "Left a rating without a comment."}</p>
 
       {review.googleReply && !done ? (
@@ -558,7 +641,7 @@ function ReviewCard({ review, canEdit, canPost, mapsUri, onChange }: {
                 value={text}
                 placeholder={review.draft.requiresHumanEdit ? "Write the reply yourself…" : "The reply…"}
                 disabled={!!busy}
-                onChange={(e) => setText(e.target.value)}
+                onChange={(e) => editReply(e.target.value)}
                 aria-label={`Reply to ${review.authorName}`}
               />
               <div className="rv-actions">
