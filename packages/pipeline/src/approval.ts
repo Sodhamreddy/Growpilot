@@ -1,5 +1,6 @@
 import { AppError, type TenantContext, requireRole } from "@ob/core";
 import type { WorkspaceSettings } from "@ob/db";
+import { reviewProcessOf } from "./team-review.js";
 
 /**
  * Article lifecycle state machine — spec §6.3 and §15.1.
@@ -51,6 +52,8 @@ export function statusAfterGates(
   settings: WorkspaceSettings,
 ): ArticleStatus {
   if (!gatesPassed) return "needs_changes";
+  // The team review is approval by definition: its levels cannot be switched off by the single-reviewer setting.
+  if (reviewProcessOf(settings) === "team") return "awaiting_approval";
   return settings.requireApprovalBeforePublish === false ? "approved" : "awaiting_approval";
 }
 
@@ -77,7 +80,7 @@ export function canPublish(
     reasons.push(`Article is "${humanize(article.status)}"; only approved articles can be published.`);
   }
 
-  if (settings.requireApprovalBeforePublish !== false && !article.approvedAt) {
+  if ((settings.requireApprovalBeforePublish !== false || reviewProcessOf(settings) === "team") && !article.approvedAt) {
     reasons.push("This workspace requires human approval, and the article has not been approved.");
   }
 

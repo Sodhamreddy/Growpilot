@@ -156,6 +156,13 @@ export class Gateway {
     }
 
     const summary = errors.map((e) => `${e.binding}: ${e.error.code}`).join("; ");
+    // A used-up daily allowance explains the failure better than "unavailable", and retrying will not help.
+    const allowance = errors.find((e) => e.error.code === "rate_limited" && !e.error.retryable)?.error;
+    if (allowance) {
+      throw new AppError("rate_limited", allowance.message, {
+        details: { taskAlias: req.taskAlias, attempts: errors.length, summary }, retryable: false,
+      });
+    }
     throw new AppError(
       "provider_error",
       "Every AI provider for this task is unavailable right now. The job will be retried.",

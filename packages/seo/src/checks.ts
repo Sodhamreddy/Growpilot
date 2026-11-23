@@ -7,6 +7,8 @@
  * suggestion so the UI can offer a fix action (spec §10.3).
  */
 
+import { containsKeyphrase, countKeyphrase } from "@ob/core";
+
 export interface CheckFinding {
   severity: "info" | "warn" | "error";
   message: string;
@@ -59,7 +61,7 @@ export function runSeoChecks(input: SeoCheckInput): CheckFinding[] {
         location: "title",
       });
     }
-    if (kw && !input.title.toLowerCase().includes(kw)) {
+    if (kw && !containsKeyphrase(input.title, kw)) {
       findings.push({
         severity: "warn",
         message: `Title does not contain the primary keyword "${input.primaryKeyword}".`,
@@ -190,7 +192,7 @@ export function runSeoChecks(input: SeoCheckInput): CheckFinding[] {
   const words = input.bodyMarkdown.toLowerCase().match(/[a-z0-9']+/g) ?? [];
   if (kw && words.length > 0) {
     const kwWordCount = kw.split(/\s+/).length;
-    const occurrences = countPhrase(words, kw.split(/\s+/));
+    const occurrences = countKeyphrase(input.bodyMarkdown, kw);
     const density = (occurrences * kwWordCount) / words.length;
     if (density > 0.03) {
       findings.push({
@@ -231,20 +233,4 @@ function findHeadingLevelSkips(
     }
   }
   return skips;
-}
-
-function countPhrase(words: string[], phrase: string[]): number {
-  if (phrase.length === 0) return 0;
-  let count = 0;
-  for (let i = 0; i + phrase.length <= words.length; i++) {
-    let match = true;
-    for (let j = 0; j < phrase.length; j++) {
-      if (words[i + j] !== phrase[j]) {
-        match = false;
-        break;
-      }
-    }
-    if (match) count++;
-  }
-  return count;
 }

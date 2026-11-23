@@ -116,6 +116,10 @@ describe("canPublish", () => {
     expect(r.allowed).toBe(false);
     expect(r.reasons.join(" ")).toMatch(/voice score 40 is below/);
   });
+  it("keeps an actual failed voice score distinct from an unconfigured voice result", () => {
+    expect(canPublish({ ...approved, voiceScore: 0 }, {}, passingGates).allowed).toBe(false);
+    expect(canPublish({ ...approved, voiceScore: null }, {}, [...passingGates, { gate: "brand", verdict: "warn" }]).allowed).toBe(true);
+  });
 
   it("applies a default score floor of 70 when none is configured", () => {
     expect(canPublish({ ...approved, seoScore: 69 }, {}, passingGates).allowed).toBe(false);

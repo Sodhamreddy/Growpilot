@@ -2,13 +2,15 @@ import { wordPressTargetFingerprint, type WordPressCredential } from "@ob/publis
 export const dynamic = "force-dynamic";
 
 import { z } from "zod";
-import { eq, and } from "drizzle-orm";
-import { AppError, idempotencyKey, open, config } from "@ob/core";
+import { eq, and, desc } from "drizzle-orm";
+import { AppError, idempotencyKey, open, config, forbidden, type TenantContext } from "@ob/core";
 import { articles, publishJobs, integrations, workspaces, repo } from "@ob/db";
-import { canPublish, assertMayPublish } from "@ob/pipeline";
+import { canPublish, assertMayPublish, mayPublish } from "@ob/pipeline";
+import { loadTeamSetup, reviewProcessFor, teamNames } from "@/lib/team-review-server";
 import { JOBS, payloadFrom } from "@ob/jobs";
 import { route, parseBody } from "@/lib/api";
 import { db, getQueues } from "@/lib/services";
+import { publishStatusView } from "@/lib/publish-status";
 
 /**
  * POST /api/articles/:id/publish — spec §11, §14.
@@ -29,7 +31,7 @@ const schema = z.object({
 });
 
 export const POST = route(async (ctx, req) => {
-  assertMayPublish(ctx);
+  await assertMayPublishHere(ctx);
   const body = await parseBody(req, schema);
   if (body.provider !== "wordpress") throw new AppError("validation_failed", "This publishing connector is not available yet.");
   const id = articleIdFrom(req);
@@ -106,6 +108,18 @@ export const POST = route(async (ctx, req) => {
     )
     .limit(1);
 
+  if (existing?.status === "failed") {
+    // A failed send never reached WordPress, so asking again is safe: put the same job back in the queue.
+    const [retry] = await database.update(publishJobs).set({ status: "queued", lastError: null })
+      .where(and(eq(publishJobs.id, existing.id), eq(publishJobs.status, "failed"))).returning({ id: publishJobs.id });
+    if (retry) {
+      await repo.writeAudit(database, ctx, { action: "article.publish_requested", entityType: "article", entityId: id,
+        after: { provider: body.provider, version: article.version, scheduledFor: "immediate", publishJobId: existing.id, retry: true } });
+      await getQueues().enqueue("publish", JOBS.publishArticle, payloadFrom(ctx, { publishJobId: existing.id }), { idempotencyKey: `publish-job:${existing.id}:retry:${Date.now()}` });
+      return { ok: true, publishJobId: existing.id, status: "queued" };
+    }
+  }
+
   if (existing) {
     if (existing.status === "queued") await getQueues().enqueue("publish", JOBS.publishArticle,
       payloadFrom(ctx, { publishJobId: existing.id }), { idempotencyKey: `publish-job:${existing.id}`, delayMs: Math.max(0, (existing.scheduledFor?.getTime() ?? Date.now()) - Date.now()) });
@@ -177,6 +191,35 @@ export const POST = route(async (ctx, req) => {
     status: "queued",
     scheduledFor: scheduledFor?.toISOString() ?? null,
   };
+});
+
+/**
+ * Who may send an article to WordPress: admins, or — in a workspace using the
+ * team review — anyone on its Content team or its Managers.
+ */
+async function assertMayPublishHere(ctx: TenantContext): Promise<void> {
+  const database = db();
+  if ((await reviewProcessFor(database, ctx)) !== "team") return assertMayPublish(ctx);
+  const setup = await loadTeamSetup(database, ctx);
+  if (setup.process !== "team") return assertMayPublish(ctx);
+  if (!mayPublish({ userId: ctx.userId, role: ctx.role }, setup.roster)) {
+    const names = [...new Set([...teamNames(setup, "content"), ...teamNames(setup, "manager")])];
+    throw forbidden(names.length
+      ? `In this workspace the Content team and Managers (${names.join(", ")}) send articles to WordPress.`
+      : "Only workspace admins can send articles to WordPress until someone is on a review team.");
+  }
+}
+
+/** GET: the article's latest WordPress delivery, so the page can show progress and link to the draft. */
+export const GET = route(async (ctx, req) => {
+  const id = articleIdFrom(req);
+  const database = db();
+  await repo.getArticle(database, ctx, id);
+  const [job] = await database.select({ status: publishJobs.status, articleVersion: publishJobs.articleVersion, externalId: publishJobs.externalId,
+    externalUrl: publishJobs.externalUrl, lastError: publishJobs.lastError }).from(publishJobs)
+    .where(and(eq(publishJobs.workspaceId, ctx.workspaceId), eq(publishJobs.entityType, "article"), eq(publishJobs.entityId, id)))
+    .orderBy(desc(publishJobs.createdAt)).limit(1);
+  return { delivery: job ? publishStatusView(job) : null };
 });
 
 function articleIdFrom(req: Request): string {

@@ -1,9 +1,8 @@
-import type { JSX } from "react";
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { eq, desc } from "drizzle-orm";
 import { getClient } from "@/lib/tenant";
-import { getSession } from "@/lib/auth";
+import { getSession, listMemberships } from "@/lib/auth";
 import { db } from "@/lib/services";
 import { workspaces, businesses, businessSources } from "@ob/db";
 import { Logo } from "@/components/Logo";
@@ -13,10 +12,10 @@ import { ClientSwitcher } from "@/components/ClientSwitcher";
 import { ClientCrawlRefresh } from "@/components/ClientCrawlRefresh";
 import { Companion } from "@/components/Companion";
 import { NavCurrentMarker } from "@/components/NavCurrentMarker";
-import {
-  IconHome, IconArticles, IconLocal, IconSocial,
-  IconSettings, IconAudit, IconHelp, IconAnalytics,
-} from "@/components/Icons";
+import { IconHelp } from "@/components/Icons";
+import { APP_NAV, type AppNavItem } from "@/components/AppNav";
+import { currentBlogAccess } from "@/lib/blog-access-server";
+import { BLOG_HOME } from "@/lib/blog-access";
 
 /*
  * Never cached.
@@ -44,29 +43,15 @@ export const dynamic = "force-dynamic";
  * find — and a customer cannot tell which is which by looking.
  */
 
-interface NavItem { href: string; label: string; icon: JSX.Element }
-
 /**
- * One flat list, no group headings.
+ * One flat list, no group headings (APP_NAV).
  *
  * Six items is short enough to read at a glance, and the labels already say
  * what each is: "AUTOMATION" above three automations was a heading that
  * repeated its own contents. Removing it took a row of chrome out of the rail
- * without losing anything.
- *
- * Nothing unbuilt is listed. A sidebar entry for a screen that does not exist
- * is worse than its absence, because a person clicks it once and stops
- * trusting the rest.
+ * without losing anything. The full-screen article page offers the same list.
  */
-const NAV: NavItem[] = [
-  { href: "/home", label: "Overview", icon: <IconHome /> },
-  { href: "/articles", label: "Blog Automation", icon: <IconArticles /> },
-  { href: "/social", label: "Social Media Timeline", icon: <IconSocial /> },
-  { href: "/social-insights", label: "Social Insights", icon: <IconAnalytics /> },
-  { href: "/reviews", label: "GMB Reviews", icon: <IconLocal /> },
-  { href: "/business", label: "Business Intelligence", icon: <IconAudit /> },
-  { href: "/settings", label: "Settings", icon: <IconSettings /> },
-];
+const NAV = APP_NAV;
 
 /**
  * Configuration, behind one entry.
@@ -79,7 +64,7 @@ export default async function DashLayout({ children }: { children: React.ReactNo
   if (!session) redirect("/signin");
 
   const database = db();
-  const [[workspace], clientRows, sourceRows, currentClient] = await Promise.all([
+  const [[workspace], clientRows, sourceRows, currentClient, memberships, access] = await Promise.all([
     database.select({
       name: workspaces.name,
       plan: workspaces.plan,
@@ -108,7 +93,12 @@ export default async function DashLayout({ children }: { children: React.ReactNo
     .where(eq(businessSources.workspaceId, session.workspaceId))
     .orderBy(desc(businessSources.createdAt)),
     getClient(),
+    // For the workspace switcher: someone invited into another workspace belongs to more than one.
+    listMemberships(session.userId),
+    // Content team and Manager members (who are not admins) only work on blogs.
+    currentBlogAccess(),
   ]);
+  const nav = access.blogOnly ? NAV.filter((item) => item.href === BLOG_HOME) : NAV;
 
   // A workspace that has not finished onboarding has no business, no profile
   // and no voice — every module would render an empty state. Send them to the
@@ -151,7 +141,7 @@ export default async function DashLayout({ children }: { children: React.ReactNo
       <ClientCrawlRefresh businessId={selectedId} status={selectedClient?.crawlStatus ?? null} />
       <aside className="sidebar">
         <NavCurrentMarker />
-        <Link href="/home" className="brand">
+        <Link href={access.blogOnly ? BLOG_HOME : "/home"} className="brand">
           <Logo size={34} />
           <span className="brandtext">
             <strong>GrowPilot</strong>
@@ -188,7 +178,7 @@ export default async function DashLayout({ children }: { children: React.ReactNo
           */}
         <nav className="nav">
           <div className="navgroup">
-            {NAV.map((i) => <NavLink key={i.href} item={i} />)}
+            {nav.map((i) => <NavLink key={i.href} item={i} />)}
           </div>
         </nav>
 
@@ -196,8 +186,10 @@ export default async function DashLayout({ children }: { children: React.ReactNo
           <UserMenu
             name={session.name ?? session.email.split("@")[0]!}
             email={session.email}
-            role={session.role}
+            role={access.blogOnly && access.teamLabel ? access.teamLabel : session.role}
             initials={initials}
+            workspaces={memberships.map((m) => ({ id: m.id, name: m.name }))}
+            activeWorkspaceId={session.workspaceId}
           />
 
           {/*
@@ -224,7 +216,7 @@ export default async function DashLayout({ children }: { children: React.ReactNo
   );
 }
 
-function NavLink({ item }: { item: NavItem }) {
+function NavLink({ item }: { item: AppNavItem }) {
   return (
     <Link href={item.href} className="navlink" prefetch>
       <span className="ico">{item.icon}</span>

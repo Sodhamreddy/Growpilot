@@ -1,0 +1,11 @@
+.highlight {
+  color: inherit;
+  background: #fff0b3;
+  border-bottom: 2px solid #e5bd49;
+  border-radius: 2px;
+  cursor: pointer;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.highlight[data-active="true"] { background: #dce4ff; border-bottom-color: #4967ee; }
+.highlight:focus-visible { outline: 2px solid #4967ee; outline-offset: 2px; }

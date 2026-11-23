@@ -9,12 +9,29 @@ import { useEffect, useRef, useState } from "react";
  * it, so there was no way to leave a session without clearing cookies by hand.
  */
 export function UserMenu({
-  name, email, role, initials,
+  name, email, role, initials, workspaces = [], activeWorkspaceId,
 }: {
   name: string; email: string; role: string; initials: string;
+  /** Every workspace this person belongs to. The switcher shows when there is more than one. */
+  workspaces?: { id: string; name: string }[];
+  activeWorkspaceId?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
+
+  async function switchWorkspace(workspaceId: string) {
+    setBusy(true); setSwitchError(null);
+    try {
+      const res = await fetch("/api/session/workspace", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workspaceId }), signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error?.message ?? "Could not switch workspace.");
+      window.location.replace("/home");
+    } catch (err) {
+      setSwitchError(err instanceof Error ? err.message : "Could not switch workspace.");
+      setBusy(false);
+    }
+  }
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -71,6 +88,18 @@ export function UserMenu({
             <strong>{name}</strong>
             <span>{email}</span>
           </div>
+          {workspaces.length > 1 ? (
+            <div className="usermenu-workspaces" role="group" aria-label="Switch workspace">
+              <span className="usermenu-label">Workspaces</span>
+              {workspaces.map((workspace) => (
+                <button key={workspace.id} type="button" role="menuitemradio" aria-checked={workspace.id === activeWorkspaceId}
+                  disabled={busy || workspace.id === activeWorkspaceId} onClick={() => void switchWorkspace(workspace.id)}>
+                  {workspace.id === activeWorkspaceId ? "✓ " : ""}{workspace.name}
+                </button>
+              ))}
+              {switchError ? <span className="usermenu-error" role="alert">{switchError}</span> : null}
+            </div>
+          ) : null}
           <button type="button" role="menuitem" onClick={() => void signOut()} disabled={busy}>
             {busy ? "Signing out…" : "Sign out"}
           </button>

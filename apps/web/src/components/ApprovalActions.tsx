@@ -3,7 +3,13 @@
 import { useEffect, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { LoadingIndicator } from "./LoadingIndicator";
+import { IconCheckCircle, IconExternal, IconWordPress } from "./ArticleWorkspaceIcons";
+import type { PublishStatus } from "@/lib/publish-status";
+import type { TeamReviewView } from "@/lib/team-review-view";
+import { TeamReviewSteps } from "./TeamReviewSteps";
 import styles from "./ArticleReviewWorkspace.module.css";
+
+const CMS_NAMES: Record<string, string> = { wordpress: "WordPress", webflow: "Webflow", ghost: "Ghost", shopify: "Shopify" };
 
 /**
  * Approve / request-changes controls.
@@ -26,6 +32,8 @@ export function ApprovalActions({
   requestChangesDisabledReason,
   reviewHelpId,
   articleStatus,
+  delivery = null,
+  team = null,
   onBusyChange,
 }: {
   articleId: string;
@@ -44,11 +52,39 @@ export function ApprovalActions({
   requestChangesDisabledReason?: string;
   reviewHelpId?: string;
   articleStatus?: string;
+  /** The article's latest WordPress delivery, as saved. */
+  delivery?: PublishStatus | null;
+  /** The team review, when the workspace uses it. */
+  team?: TeamReviewView | null;
   onBusyChange?: (busy: boolean) => void;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [busy, setBusy] = useState(false);
+  // Publishing runs in the background; track it here so a click always shows what happened.
+  const [sent, setSent] = useState<PublishStatus | null>(delivery);
+  const sending = sent?.version === version && (sent.status === "queued" || sent.status === "running");
+  useEffect(() => {
+    if (!sending) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const started = Date.now();
+    const check = async () => {
+      try {
+        const res = await fetch(`/api/articles/${articleId}/publish`, { cache: "no-store" });
+        const body = await res.json() as { delivery?: PublishStatus | null };
+        if (stopped) return;
+        if (res.ok && body.delivery) {
+          setSent(body.delivery);
+          if (body.delivery.status === "succeeded" || body.delivery.status === "failed") { startTransition(() => router.refresh()); return; }
+        }
+      } catch { /* keep waiting; the next check may succeed */ }
+      if (!stopped && Date.now() - started < 120_000) timer = setTimeout(() => void check(), 2000);
+      else if (!stopped) setError({ message: "WordPress is taking longer than usual. Check that `npm run dev` is running (the background worker sends the post), then refresh this page." });
+    };
+    timer = setTimeout(() => void check(), 1500);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [sending, articleId, router]);
   const [error, setError] = useState<{ message: string; detail?: string } | null>(null);
   const [note, setNote] = useState("");
   const [qaNotice, setQaNotice] = useState("");
@@ -110,7 +146,8 @@ export function ApprovalActions({
         });
         return;
       }
-      startTransition(() => router.refresh());
+      // Accepted: the background worker sends it. The status checks above report the outcome.
+      setSent({ status: "queued", version, postUrl: null, editUrl: null, error: null });
     } catch {
       setError({ message: "Could not reach the server. Check your connection and try again." });
     } finally {
@@ -157,22 +194,43 @@ export function ApprovalActions({
   useEffect(() => { onBusyChange?.(disabled); }, [disabled, onBusyChange]);
   useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
 
+  const decided = Boolean(articleStatus && ["approved", "scheduled", "published"].includes(articleStatus));
+  const target = publishTarget ? CMS_NAMES[publishTarget] ?? publishTarget.charAt(0).toUpperCase() + publishTarget.slice(1) : "";
+  const cmsIcon = publishTarget === "wordpress" ? <IconWordPress size={20} /> : null;
+  // Sending always creates a draft in the CMS; a person publishes it there.
+  const current = sent?.version === version ? sent : null;
+  const draftLink = current?.status === "succeeded" ? current.editUrl ?? current.postUrl : null;
+  const delivery_ = !canPublish ? null : current?.status === "succeeded" ? <div className={styles.delivered} role="status">
+    <strong><IconCheckCircle size={17} /> Draft created in {target}</strong>
+    <p>Review it in {target} and press Publish there when you are ready.</p>
+    {draftLink && <a className={styles.primaryButton} href={draftLink} target="_blank" rel="noopener noreferrer">{cmsIcon}Open in {target} <IconExternal size={15} /></a>}
+  </div> : <>
+    <button type="button" className={styles.primaryButton} disabled={disabled || sending} onClick={() => void publish()}>
+      {cmsIcon}{sending ? `Sending to ${target}…` : current?.status === "failed" ? `Try sending to ${target} again` : `Send to ${target}`}</button>
+    {current?.status === "failed"
+      ? <div role="alert" className={styles.actionError}>{target} did not accept the post{current.error ? `: ${current.error}` : "."}</div>
+      : <p className={styles.publishHint} role="status">{sending ? <LoadingIndicator label="Creating the draft. This usually takes a few seconds." /> : `Creates a draft in ${target}. You publish it from there.`}</p>}
+  </>;
+  // Team review: show only the decisions this person can make at this level; the tracker says who else is next.
+  const teamLevel = team?.stage === "content" || team?.stage === "manager";
+  const showApprove = !decided && (!team || canApprove);
+  const showRequestChanges = !team || canRequestChanges;
+  const approveLabel = team?.stage === "content" ? "Approve for Manager" : team?.stage === "manager" ? "Give Final Approval" : "Approve Article";
   if (compact) return <div className={styles.approval}>
+    {team && <TeamReviewSteps team={team} />}
     {disabled && <LoadingIndicator label="Updating article…" />}
-    {canRunQa && !canApprove && <button type="button" className={`${styles.primaryButton} ${styles.qaAction}`} disabled={disabled} onClick={() => void runQa()}>Run quality checks</button>}
-    {canPublish && <button type="button" className={styles.primaryButton} disabled={disabled} onClick={() => void publish()}>{disabled ? "Publishing…" : `Publish to ${publishTarget}`}</button>}
-    {articleStatus && ["approved", "scheduled", "published"].includes(articleStatus)
-      ? <span className={styles.approvalStatus}>{published ? "Published" : articleStatus === "scheduled" ? "Approved · Scheduled" : "This version is approved"}</span>
-      : null}
-    <div className={styles.decisionRow}>
-      {!articleStatus || !["approved", "scheduled", "published"].includes(articleStatus) ? <button type="button" className={styles.primaryButton} disabled={!canApprove || disabled}
+    {canRunQa && !canApprove && !teamLevel && <button type="button" className={`${styles.primaryButton} ${styles.qaAction}`} disabled={disabled} onClick={() => void runQa()}>Run Quality Checks</button>}
+    {delivery_}
+    {(showApprove || showRequestChanges) && <div className={styles.decisionRow} data-single={!(showApprove && showRequestChanges) || undefined}>
+      {showApprove ? <button type="button" className={styles.primaryButton} disabled={!canApprove || disabled}
         aria-describedby={!canApprove ? reviewHelpId : undefined} onClick={() => void submit("approve")}
-        title={canApprove ? "Approve this version" : approveDisabledReason ?? "Run quality checks before approval"}>{disabled ? "Working…" : "Approve article"}</button> : null}
-      <button type="button" className={styles.rejectButton} disabled={!canRequestChanges || disabled}
+        title={canApprove ? "Approve this version" : approveDisabledReason ?? "Run quality checks before approval"}>{disabled ? "Working…" : approveLabel}</button> : null}
+      {showRequestChanges ? <button type="button" className={styles.rejectButton} disabled={!canRequestChanges || disabled}
         aria-describedby={!canRequestChanges ? reviewHelpId : undefined} onClick={() => void submit("request_changes")}
-        title={canRequestChanges ? "Return this draft for changes" : requestChangesDisabledReason}>Request changes</button>
-    </div>
+        title={canRequestChanges ? "Return this draft for changes" : requestChangesDisabledReason}>Request Changes</button> : null}
+    </div>}
     {canRunQa && canApprove && <button type="button" className={styles.button} disabled={disabled} onClick={() => void runQa()}>Run checks again</button>}
+    {decided && <span className={styles.approvalStatus}><IconCheckCircle size={17} />{published ? "Published" : articleStatus === "scheduled" ? "Approved · Scheduled" : "This version is approved"}</span>}
     <details className={styles.reviewNote}>
       <summary>Add a review note</summary>
       <label htmlFor="approval-note">Your note</label>

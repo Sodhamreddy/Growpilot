@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { AppError, requireRole } from "@ob/core";
 import { repo, topics, keywords, workspaces } from "@ob/db";
 import { splitSections, suggestScoreImprovements } from "@ob/blog";
+import { retrieve } from "@ob/kb";
 import { route, parseBody } from "@/lib/api";
 import { db, getGateway } from "@/lib/services";
 import { scoreImprovementPlanSchema } from "@/lib/score-improvements";
@@ -31,7 +32,7 @@ export const POST = route(async (ctx, req) => {
   }
   const originalStatus = article.status;
   const originalUpdatedAt = article.updatedAt.getTime();
-  const [business, facts, gates, score, [workspace], keywordRows] = await Promise.all([
+  const [business, facts, gates, score, [workspace], keywordRows, voice] = await Promise.all([
     repo.getBusiness(database, ctx, article.businessId),
     repo.listFacts(database, ctx, article.businessId),
     repo.listGateResults(database, ctx, id, article.version),
@@ -41,13 +42,19 @@ export const POST = route(async (ctx, req) => {
     article.topicId ? database.select({ term: keywords.term }).from(topics)
       .leftJoin(keywords, and(eq(keywords.id, topics.primaryKeywordId), eq(keywords.workspaceId, ctx.workspaceId), eq(keywords.businessId, article.businessId)))
       .where(and(eq(topics.id, article.topicId), eq(topics.workspaceId, ctx.workspaceId), eq(topics.businessId, article.businessId))).limit(1) : Promise.resolve([]),
+    repo.getActiveVoice(database, ctx, article.businessId),
   ]);
   const minimumScore = workspace?.settings?.minSeoScoreToPublish ?? 70;
-  const proposal = await suggestScoreImprovements(getGateway(), ctx, {
-    business, facts, article: { title: article.title, metaTitle: article.metaTitle,
+  const minimumVoiceScore = workspace?.settings?.minVoiceScoreToPublish ?? 70;
+  const gateway = getGateway();
+  const primaryKeyword = keywordRows[0]?.term ?? article.title;
+  const evidence = await retrieve(database, gateway, ctx, { businessId: article.businessId, query: `${article.title} ${primaryKeyword}`, limit: 8 });
+  const proposal = await suggestScoreImprovements(gateway, ctx, {
+    business, facts, voice, evidence, article: { title: article.title, metaTitle: article.metaTitle,
       metaDescription: article.metaDescription, bodyMarkdown: article.bodyMarkdown },
-    primaryKeyword: keywordRows[0]?.term ?? article.title,
+    primaryKeyword,
     currentScore: article.seoScore, minimumScore,
+    currentVoiceScore: voice ? article.voiceScore : null, minimumVoiceScore,
     gates: gates.map(gate => ({ gate: gate.gate, verdict: gate.verdict, findings: gate.findings })),
     scoreComponents: score?.components ?? [],
   });
@@ -64,5 +71,6 @@ export const POST = route(async (ctx, req) => {
   await repo.writeAudit(database, ctx, { action: "article.score_improvements_proposed", entityType: "article", entityId: id,
     after: { version: article.version, currentScore: article.seoScore, minimumScore,
       count: parsed.data.suggestions.length, targets: parsed.data.suggestions.map(suggestion => suggestion.target) } });
-  return { ok: true, expectedVersion: article.version, currentScore: article.seoScore, minimumScore, ...parsed.data };
+  return { ok: true, expectedVersion: article.version, currentScore: article.seoScore, minimumScore,
+    currentVoiceScore: voice ? article.voiceScore : null, minimumVoiceScore, hasVoiceProfile: Boolean(voice), ...parsed.data };
 }, { rateLimit: { limit: 30, windowSeconds: 3600 } });

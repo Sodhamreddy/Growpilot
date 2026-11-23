@@ -58,6 +58,14 @@ afterAll(async () => { await pg?.close(); });
 beforeEach(() => { state.enqueue.mockClear(); state.getJob.mockReset().mockResolvedValue(null); state.gates.mockReset().mockResolvedValue(passing); });
 
 describe.sequential("article editing and quality checks", () => {
+  it("stores a missing brand voice as unmeasured so publishing cannot mistake it for a failed zero", async () => {
+    const article = await createArticle({ voiceScore: 0 });
+    state.gates.mockResolvedValueOnce({ ...passing, voiceScore: null, gates: [
+      ...passing.gates, { gate: "brand", verdict: "warn", score: null, findings: [{ severity: "warn", message: "No approved brand voice is active." }] },
+    ] });
+    await processRunQualityGates(wc(), payload(article.id));
+    expect((await database.select().from(articles).where(eq(articles.id, article.id)))[0]?.voiceScore).toBeNull();
+  });
   it("saves a selected batch as one version and checks that saved content", async () => {
     const article = await createArticle({ seoScore: 69.6, voiceScore: 90, approvedAt: new Date() });
     const bodyMarkdown = "## Costs\n\nBetter cost questions.\n\n## Locations\n\nBetter location guidance.";

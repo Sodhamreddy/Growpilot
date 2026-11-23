@@ -11,7 +11,7 @@ type Mode = "signin" | "signup" | "forgot";
 /** Must match the server-side rule in /api/auth/signup. */
 const MIN_PASSWORD = 8;
 
-function passwordHint(password: string): string {
+export function passwordHint(password: string): string {
   if (!password) return "8+ characters with uppercase, lowercase, number, and special character.";
   const missing = [
     password.length >= MIN_PASSWORD ? null : `${MIN_PASSWORD - password.length} more character${MIN_PASSWORD - password.length === 1 ? "" : "s"}`,
@@ -23,7 +23,7 @@ function passwordHint(password: string): string {
   return missing.length ? `Add: ${missing.join(", ")}.` : "Password looks good.";
 }
 
-export function AuthForm({ googleEnabled = false }: { googleEnabled?: boolean }) {
+export function AuthForm({ googleEnabled = false, next }: { googleEnabled?: boolean; next?: string | null }) {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("signin");
   const [busy, setBusy] = useState(false);
@@ -98,7 +98,8 @@ export function AuthForm({ googleEnabled = false }: { googleEnabled?: boolean })
 
       // A new account has nothing set up yet, so it starts the flow rather than
       // landing on an empty dashboard. Sign-in resumes wherever they were.
-      window.location.replace(mode === "signup" ? "/onboarding" : "/home");
+      // `next` brings someone who signed in to accept an invite back to it.
+      window.location.replace(mode === "signup" ? "/onboarding" : next ?? "/home");
     } catch (err) {
       const timedOut = err instanceof DOMException && err.name === "TimeoutError";
       setError({

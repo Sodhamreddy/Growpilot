@@ -5,18 +5,24 @@ import Link from "next/link";
 import { IconArticles, IconArrow, IconKeywords } from "./Icons";
 import { BlogHeaderActions } from "./BlogHeaderActions";
 import type { BlogPrompts } from "./BlogPromptSettings";
+import { STAGE_LABEL, type TeamStageName } from "@/lib/team-review-view";
 import styles from "./BlogQueue.module.css";
 
 type QueueArticle = {
   id: string; title: string; status: string; version: number;
   seoScore: number | null; voiceScore: number | null; wordCount: number; updatedAt: Date | string;
 };
-type QueueFilter = "all" | "attention" | "progress" | "review" | "approved" | "scheduled" | "published";
+type QueueFilter = "all" | "mine" | "attention" | "progress" | "review" | "approved" | "scheduled" | "published";
+/** Team review only: each article's level, and whether it waits on the person looking. */
+type TeamQueue = Record<string, { stage: TeamStageName; mine: boolean }>;
 interface BlogQueueProps {
   articles: QueueArticle[]; allArticles: QueueArticle[]; activeStatus: string;
   businessId: string | null; businessName: string; canEdit: boolean; blockedReason: string | null;
-  prompts: BlogPrompts; connected: boolean;
+  prompts: BlogPrompts; connected: boolean; team?: TeamQueue | null;
 }
+const TEAM_ACTIONS: Partial<Record<TeamStageName, string>> = {
+  content: "Approve draft", manager: "Give final approval", publish: "Send to WordPress", revision: "Revise draft",
+};
 const FILTERS: { id: QueueFilter; label: string }[] = [
   { id: "all", label: "All articles" }, { id: "attention", label: "Needs attention" },
   { id: "progress", label: "In progress" }, { id: "review", label: "Ready to review" },
@@ -55,14 +61,17 @@ export function BlogQueue(props: BlogQueueProps) {
   return <QueueWorkspace key={`${props.businessId ?? "no-business"}:${props.activeStatus}`} {...props} />;
 }
 
-function QueueWorkspace({ articles, allArticles, activeStatus, businessId, businessName, canEdit, blockedReason, prompts, connected }: BlogQueueProps) {
+function QueueWorkspace({ articles, allArticles, activeStatus, businessId, businessName, canEdit, blockedReason, prompts, connected, team = null }: BlogQueueProps) {
   const [filter, setFilter] = useState<QueueFilter>(initialFilter(activeStatus));
   const [query, setQuery] = useState("");
   const source = allArticles.length ? allArticles : articles;
   const search = query.trim().toLocaleLowerCase();
-  const visible = source.filter(article => matchesFilter(article.status, filter) && (!search || article.title.toLocaleLowerCase().includes(search)));
+  const matches = (article: QueueArticle, value: QueueFilter) => value === "mine" ? Boolean(team?.[article.id]?.mine) : matchesFilter(article.status, value);
+  const visible = source.filter(article => matches(article, filter) && (!search || article.title.toLocaleLowerCase().includes(search)));
   const filtered = filter !== "all" || Boolean(search);
-  const count = (value: QueueFilter) => source.filter(article => matchesFilter(article.status, value)).length;
+  const count = (value: QueueFilter) => source.filter(article => matches(article, value)).length;
+  // In the team review, "Waiting on you" is the hand-off: what the next level needs from this person.
+  const filters = team ? [FILTERS[0]!, { id: "mine" as const, label: "Waiting on you" }, ...FILTERS.slice(1)] : FILTERS;
   const reset = () => { setFilter("all"); setQuery(""); };
 
   return <div className={styles.workspace}>
@@ -70,7 +79,8 @@ function QueueWorkspace({ articles, allArticles, activeStatus, businessId, busin
     <section className={styles.frame} aria-label="Article library">
       <div className={styles.listToolbar}>
         <div className={styles.filters} role="group" aria-label="Filter articles">
-          {FILTERS.map(item => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}>
+          {filters.map(item => <button key={item.id} type="button" aria-pressed={filter === item.id} onClick={() => setFilter(item.id)}
+            data-attention={item.id === "mine" && count("mine") > 0 ? true : undefined}>
             {item.label}<span>{count(item.id)}</span>
           </button>)}
         </div>
@@ -94,15 +104,22 @@ function QueueWorkspace({ articles, allArticles, activeStatus, businessId, busin
           const updated = article.updatedAt instanceof Date ? article.updatedAt : new Date(article.updatedAt);
           const validDate = Number.isFinite(updated.getTime());
           const updatedLabel = validDate ? updated.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "Asia/Kolkata" }) : "—";
+          const level = team?.[article.id];
+          const statusLabel = level && level.stage !== "drafting" ? STAGE_LABEL[level.stage] : STATUS_LABELS[article.status] ?? article.status.replace(/_/g, " ");
+          const action = level?.mine ? (TEAM_ACTIONS[level.stage] ?? nextAction(article.status, canEdit))
+            : level && (level.stage === "content" || level.stage === "manager") ? "View article"
+              : nextAction(article.status, canEdit);
+          const highlight = level ? level.mine : article.status === "awaiting_approval" && canEdit;
           return <tr key={article.id}>
             <td className={styles.titleCell}><Link className={styles.articleTitle} href={`/articles/${article.id}`}>{article.title}</Link>
               <span className={styles.articleMeta}>v{article.version}{article.wordCount > 0 ? ` · ${article.wordCount.toLocaleString()} words` : ""}<span className={styles.inlineUpdated}> · Updated {updatedLabel}</span></span></td>
-            <td className={styles.statusCell}><span className={styles.status} data-status={article.status}>{STATUS_LABELS[article.status] ?? article.status.replace(/_/g, " ")}</span></td>
+            <td className={styles.statusCell}><span className={styles.status} data-status={article.status}>{statusLabel}</span>
+              {level?.mine ? <span className={styles.yourTurn}>Your turn</span> : null}</td>
             <td className={styles.scoreCell}>{article.seoScore === null ? <span className={styles.unchecked}>Not checked</span>
               : <span className={styles.score}>{article.seoScore.toLocaleString("en-US", { maximumFractionDigits: 1 })}<span className={styles.scoreMax}> / 100</span></span>}</td>
             <td className={styles.updatedCell}><time dateTime={validDate ? updated.toISOString() : undefined}>{updatedLabel}</time></td>
-            <td className={styles.actionCell}><Link className={`${styles.openArticle} ${article.status === "awaiting_approval" && canEdit ? styles.reviewAction : ""}`} href={`/articles/${article.id}`}>
-              {nextAction(article.status, canEdit)}<IconArrow size={15} />
+            <td className={styles.actionCell}><Link className={`${styles.openArticle} ${highlight ? styles.reviewAction : ""}`} href={`/articles/${article.id}`}>
+              {action}<IconArrow size={15} />
             </Link></td>
           </tr>;
         })}</tbody>

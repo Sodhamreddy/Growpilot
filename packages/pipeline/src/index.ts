@@ -18,4 +18,5 @@ export * from "./instructions.js";
 export * from "./voice-extract.js";
 export * from "./gates.js";
 export * from "./approval.js";
+export * from "./team-review.js";
 export * from "./completeness.js";

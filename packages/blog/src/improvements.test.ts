@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { normalizeScoreImprovements, suggestScoreImprovements, type ScoreImprovementInput } from "./improvements.js";
+import { fitMetadata, keywordChecks, metadataFixes, normalizeScoreImprovements, suggestScoreImprovements, type ScoreImprovementInput } from "./improvements.js";
 
 const ctx = { workspaceId: "workspace", userId: "user", role: "editor", correlationId: "request" } as never;
 const input: ScoreImprovementInput = {
@@ -16,12 +16,69 @@ const description = { title: "Summarize the article", reason: "The saved SEO fin
 const section = { title: "Clarify the opening", reason: "Readers need a concise introduction to the questions this article answers.", priority: "medium",
   target: "section", sectionId: "0", instruction: "Clarify the opening around home care questions without adding facts or links." };
 
+describe("keyword checks", () => {
+  it("counts the keyword written naturally, where the SEO score looks for it", () => {
+    expect(keywordChecks({ title: "In-Home Dementia Care in Birmingham", metaTitle: null,
+      metaDescription: "Choosing in-home dementia care Birmingham families trust.",
+      bodyMarkdown: "We offer in-home dementia care in Birmingham.\n\nIn-home dementia care Birmingham: what to expect. Dementia care at home in Birmingham." },
+      "in-home dementia care birmingham")).toEqual({
+      keyword: "in-home dementia care birmingham", inSeoTitle: true, inMetaDescription: true, inH1Title: true, bodyOccurrences: 2,
+    });
+  });
+
+  it("matches the real article that the exact check marked as missing everywhere", () => {
+    const checks = keywordChecks({ title: "Understanding Payment Options for In-Home Senior Care in Ann Arbor",
+      metaTitle: "Payment Options: In-Home Senior Care in Ann Arbor", metaDescription: null,
+      bodyMarkdown: "Understanding the payment options for in-home senior care in Ann Arbor is crucial." }, "payment options in-home senior care ann arbor");
+    expect(checks).toMatchObject({ inSeoTitle: true, inH1Title: true, bodyOccurrences: 1 });
+  });
+
+  it("checks the SEO title as the meta title when one is set", () => {
+    const checks = keywordChecks({ title: "Home care questions to ask", metaTitle: "Planning care at home", metaDescription: null, bodyMarkdown: "" }, "home care questions");
+    expect(checks).toMatchObject({ inSeoTitle: false, inH1Title: true, bodyOccurrences: 0 });
+  });
+
+  it("is sent to the model with how matching works and the metadata it must fix", async () => {
+    const generate = vi.fn().mockResolvedValue({ parsed: { summary: "Add the keyword.", suggestions: [] } });
+    await suggestScoreImprovements({ generate } as never, ctx, input);
+    const prompt = generate.mock.calls[0]![1].system as string;
+    expect(prompt).toContain('"keywordChecks":{"keyword":"home care questions"');
+    expect(prompt).toContain("small\n  connecting words");
+    expect(prompt).toContain('"mustFix":["metaTitle: the SEO title is 9 characters (needs 30–60) and does not use the keyword.","metaDescription: the meta description is missing."]');
+  });
+});
+
+describe("metadata the AI must fix", () => {
+  it("lists out-of-range lengths and a missing keyword, and nothing when both are fine", () => {
+    const article = { title: "Understanding Payment Options for In-Home Senior Care in Ann Arbor", metaTitle: "Payment Options: In-Home Senior Care in Ann Arbor", bodyMarkdown: "",
+      metaDescription: "Understand your payment options for in-home senior care in Ann Arbor, including Private Pay, Long-Term Care Insurance, Veteran Benefits, and Michigan's Medicaid Home Help Program." };
+    expect(metadataFixes(article, "payment options in-home senior care ann arbor")).toEqual(["metaDescription: the meta description is 179 characters (needs 120–160)."]);
+    expect(metadataFixes({ ...article, metaDescription: article.metaDescription.slice(0, 140) }, "payment options in-home senior care ann arbor")).toEqual([]);
+  });
+
+  it("ends an overlong description at a full sentence or clause instead of dropping it", () => {
+    const long = "Understand your payment options for in-home senior care in Ann Arbor, including Private Pay, Long-Term Care Insurance, Veteran Benefits, and Michigan's Medicaid Home Help Program.";
+    expect(fitMetadata(long, "metaDescription")).toBe("Understand your payment options for in-home senior care in Ann Arbor, including Private Pay, Long-Term Care Insurance, Veteran Benefits.");
+    const sentence = "Families in Ann Arbor can pay for in-home senior care through private pay, long-term care insurance, veterans benefits or Medicaid waivers.";
+    expect(sentence.length).toBeGreaterThanOrEqual(120);
+    expect(fitMetadata(`${sentence} Learn which option fits your family best.`, "metaDescription")).toBe(sentence);
+    expect(fitMetadata("Payment Options for In-Home Senior Care in Ann Arbor | Northside Senior Living", "metaTitle")).toBe("Payment Options for In-Home Senior Care in Ann Arbor");
+    expect(fitMetadata("A".repeat(200), "metaDescription")).toBe("A".repeat(200));
+  });
+
+  it("keeps a trimmed AI description instead of discarding it", () => {
+    const long = "Understand your payment options for in-home senior care in Ann Arbor, including Private Pay, Long-Term Care Insurance, Veteran Benefits, and Michigan's Medicaid Home Help Program.";
+    const plan = normalizeScoreImprovements({ summary: "Fix metadata.", suggestions: [{ title: "Shorten the description", reason: "It is 179 characters.", priority: "high", target: "metaDescription", value: long }] }, input);
+    expect(plan.suggestions[0]).toMatchObject({ target: "metaDescription", value: expect.stringMatching(/Veteran Benefits\.$/) });
+  });
+});
+
 describe("score improvement suggestions", () => {
   it("uses measured findings, thresholds and the weakest score components in the model request", async () => {
     const generate = vi.fn().mockResolvedValue({ parsed: { summary: "Start with the missing description.", suggestions: [description] } });
     const result = await suggestScoreImprovements({ generate } as never, ctx, input);
     expect(generate).toHaveBeenCalledOnce();
-    expect(generate.mock.calls[0]![1]).toMatchObject({ taskAlias: "reasoning_high", promptVersion: "blog.score-improvements.v2" });
+    expect(generate.mock.calls[0]![1]).toMatchObject({ taskAlias: "reasoning_high", promptVersion: "blog.article-improvements.v5" });
     const prompt = generate.mock.calls[0]![1].system as string;
     expect(prompt).toContain('"measuredSeoScore":69.6');
     expect(prompt).toContain('"requiredMinimum":70');
@@ -108,13 +165,13 @@ describe("score improvement suggestions", () => {
     expect(result.suggestions).toHaveLength(2);
   });
 
-  it("filters instructions to add links even when no literal URL is provided", () => {
+  it("filters instructions to add links when no verified destinations are available", () => {
     const result = normalizeScoreImprovements({ suggestions: [
       { ...section, instruction: "Add an internal link to the services page." },
       { ...section, instruction: "Link to the services page using a clear anchor." },
       { ...section, instruction: "Insert two links to helpful guides.".replace("two", "2") },
       section,
-    ] }, input);
+    ] }, { ...input, facts: [], evidence: [] });
     expect(result.suggestions).toHaveLength(1);
     expect(result.suggestions[0]?.instruction).toBe(section.instruction);
   });

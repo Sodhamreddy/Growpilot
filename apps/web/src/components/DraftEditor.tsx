@@ -1,9 +1,13 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, useTransition, type Ref } from "react";
 import { useRouter } from "next/navigation";
-import { RichTextEditor } from "./RichTextEditor";
+import type { CommentAnchor } from "@/lib/article-comment-text";
+import { findEditedPassage } from "@/lib/editor-comment-range";
+import { RichTextEditor, type RichTextHandle } from "./RichTextEditor";
 import { LoadingIndicator } from "./LoadingIndicator";
+import { ArticleMarkdown } from "./ArticleMarkdown";
+export { ArticleMarkdown, CommentHighlightedText } from "./ArticleMarkdown";
 
 /**
  * The draft, readable and editable.
@@ -31,8 +35,14 @@ export interface DraftArticle {
 
 const EDITABLE = ["draft", "qa", "needs_changes", "awaiting_approval"];
 
-export function DraftEditor({ article, canEdit, initialMode = "preview", onDone, onDirtyChange }: {
+export interface DraftEditorHandle {
+  /** Select a comment's passage in the open editor and scroll to it. False when the edits changed or removed it. */
+  reveal(anchor: CommentAnchor): boolean;
+}
+
+export function DraftEditor({ article, canEdit, initialMode = "preview", onDone, onDirtyChange, revealRef }: {
   article: DraftArticle; canEdit: boolean; initialMode?: "preview" | "edit"; onDone?: (saved?: boolean) => void; onDirtyChange?: (dirty: boolean) => void;
+  revealRef?: Ref<DraftEditorHandle>;
 }) {
   const router = useRouter();
   const [refreshing, startRefresh] = useTransition();
@@ -44,6 +54,27 @@ export function DraftEditor({ article, canEdit, initialMode = "preview", onDone,
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const richText = useRef<RichTextHandle>(null);
+  const titleInput = useRef<HTMLInputElement>(null);
+
+  // Comment offsets count the title, then the body, with nothing between them.
+  useImperativeHandle(revealRef, () => ({
+    reveal(anchor) {
+      const editor = richText.current;
+      if (mode !== "edit" || !editor) return false;
+      const at = findEditedPassage(title + editor.text(), anchor);
+      if (!at) return false;
+      if (at.end > title.length) return editor.select(Math.max(at.start, title.length) - title.length, at.end - title.length);
+      requestAnimationFrame(() => {
+        const input = titleInput.current;
+        if (!input) return;
+        input.focus({ preventScroll: true });
+        input.setSelectionRange(at.start, at.end);
+        input.scrollIntoView({ block: "center", behavior: "smooth" });
+      });
+      return true;
+    },
+  }), [mode, title]);
 
   const editable = canEdit && EDITABLE.includes(article.status);
   const dirty =
@@ -141,7 +172,7 @@ export function DraftEditor({ article, canEdit, initialMode = "preview", onDone,
         <>
           <div className="field">
             <label htmlFor="draft-title">Title</label>
-            <input id="draft-title" type="text" value={title}
+            <input id="draft-title" ref={titleInput} type="text" value={title}
                    onChange={(e) => setTitle(e.target.value)} />
           </div>
 
@@ -171,15 +202,8 @@ export function DraftEditor({ article, canEdit, initialMode = "preview", onDone,
 
           <div className="field">
             <span className="fieldlabel">Body</span>
-            <RichTextEditor markdown={body} onChange={setBody} />
+            <RichTextEditor markdown={body} onChange={setBody} handleRef={richText} />
           </div>
-
-          <p className="small muted" style={{ margin: "0 0 14px", maxWidth: "70ch" }}>
-            Saving creates a new version and clears the SEO and voice scores — they describe
-            the previous text, and an edited draft should not inherit a score it did not earn.
-            Run the quality gates again afterwards.
-          </p>
-
         </>
       ) : (
         <ArticleMarkdown source={body} />
@@ -189,124 +213,4 @@ export function DraftEditor({ article, canEdit, initialMode = "preview", onDone,
       {saved && !error ? <p className="small muted" style={{ marginTop: 12 }}>Saved.</p> : null}
     </div>
   );
-}
-
-/**
- * Render the draft's markdown.
- *
- * Deliberately small and built from React elements rather than `innerHTML`:
- * this text comes from a model, and a renderer that sets raw HTML would let a
- * generated string put markup into the dashboard. Escaping is automatic when
- * everything is a React child.
- */
-export function ArticleMarkdown({ source }: { source: string }) {
-  if (!source.trim()) {
-    return (
-      <div className="empty">
-        <strong>No draft yet</strong>
-        <span>Generate one to see it here.</span>
-      </div>
-    );
-  }
-
-  const blocks: React.ReactNode[] = [];
-  const lines = source.replace(/\r\n/g, "\n").split("\n");
-  let paragraph: string[] = [];
-  let list: string[] = [];
-  let listOrdered = false;
-
-  const flushParagraph = () => {
-    if (paragraph.length === 0) return;
-    blocks.push(<p key={blocks.length}>{inline(paragraph.join(" "))}</p>);
-    paragraph = [];
-  };
-
-  const flushList = () => {
-    if (list.length === 0) return;
-    const items = list.map((item, i) => <li key={i}>{inline(item)}</li>);
-    blocks.push(listOrdered ? <ol key={blocks.length}>{items}</ol> : <ul key={blocks.length}>{items}</ul>);
-    list = [];
-  };
-
-  for (const raw of lines) {
-    const line = raw.trimEnd();
-
-    if (!line.trim()) {
-      flushParagraph();
-      flushList();
-      continue;
-    }
-
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      flushParagraph();
-      flushList();
-      const level = Math.min(heading[1]!.length, 6);
-      const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
-      blocks.push(<Tag key={blocks.length}>{inline(heading[2]!.trim())}</Tag>);
-      continue;
-    }
-
-    if (/^>\s?/.test(line)) {
-      flushParagraph();
-      flushList();
-      blocks.push(<blockquote key={blocks.length}>{inline(line.replace(/^>\s?/, ""))}</blockquote>);
-      continue;
-    }
-
-    const bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
-    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
-    if (bullet || numbered) {
-      flushParagraph();
-      const wantsOrdered = Boolean(numbered);
-      if (list.length > 0 && wantsOrdered !== listOrdered) flushList();
-      listOrdered = wantsOrdered;
-      list.push((bullet ?? numbered)![1]!.trim());
-      continue;
-    }
-
-    paragraph.push(line.trim());
-  }
-
-  flushParagraph();
-  flushList();
-
-  return <div className="prose">{blocks}</div>;
-}
-
-/** Bold, italic, code and links, as React nodes. */
-function inline(text: string): React.ReactNode[] {
-  const out: React.ReactNode[] = [];
-  const pattern = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\))/g;
-  let last = 0;
-  let key = 0;
-
-  for (const match of text.matchAll(pattern)) {
-    const at = match.index!;
-    if (at > last) out.push(text.slice(last, at));
-    const token = match[0];
-
-    if (token.startsWith("**")) {
-      out.push(<strong key={key++}>{token.slice(2, -2)}</strong>);
-    } else if (token.startsWith("`")) {
-      out.push(<code key={key++}>{token.slice(1, -1)}</code>);
-    } else if (token.startsWith("[")) {
-      const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(token)!;
-      const href = link[2]!;
-      // Only http(s) and root-relative links become links. A javascript: href
-      // in generated copy would otherwise be clickable in the dashboard.
-      const safe = /^https?:\/\//i.test(href) || href.startsWith("/");
-      out.push(
-        safe
-          ? <a key={key++} href={href} target="_blank" rel="noopener noreferrer">{link[1]}</a>
-          : <span key={key++}>{link[1]}</span>,
-      );
-    } else {
-      out.push(<em key={key++}>{token.slice(1, -1)}</em>);
-    }
-    last = at + token.length;
-  }
-
-  if (last < text.length) out.push(text.slice(last));
-  return out;
 }

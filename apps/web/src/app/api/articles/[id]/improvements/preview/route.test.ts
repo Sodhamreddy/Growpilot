@@ -6,13 +6,15 @@ const state = vi.hoisted(() => ({
   article: { id: "33333333-3333-4333-8333-333333333333", businessId: "44444444-4444-4444-8444-444444444444", topicId: null as string | null,
     version: 2, status: "needs_changes", updatedAt: new Date("2026-10-27T10:00:00Z"), title: "Home care questions", metaTitle: null, metaDescription: null,
     bodyMarkdown: "Original opening.\n\n## Planning\n\nOriginal planning.", seoScore: 69.6 },
-  getArticle: vi.fn(), getBusiness: vi.fn(), listFacts: vi.fn(), getActiveVoice: vi.fn(), writeAudit: vi.fn(),
+  getArticle: vi.fn(), getBusiness: vi.fn(), listFacts: vi.fn(), getActiveVoice: vi.fn(), listGateResults: vi.fn(), getScore: vi.fn(), retrieve: vi.fn(), writeAudit: vi.fn(),
   preview: vi.fn(), select: vi.fn(), update: vi.fn(), insert: vi.fn(), rows: [] as unknown[][],
 }));
 vi.mock("@ob/db", async original => ({ ...await original<object>(), repo: {
   getArticle: state.getArticle, getBusiness: state.getBusiness, listFacts: state.listFacts, getActiveVoice: state.getActiveVoice, writeAudit: state.writeAudit,
+  listGateResults: state.listGateResults, getScore: state.getScore,
 } }));
 vi.mock("@ob/blog", () => ({ previewScoreImprovements: state.preview }));
+vi.mock("@ob/kb", () => ({ retrieve: state.retrieve }));
 vi.mock("@/lib/services", () => ({ db: () => ({ select: state.select, update: state.update, insert: state.insert }), getGateway: () => ({ kind: "gateway" }) }));
 vi.mock("@/lib/api", () => ({ route: (handler: Function) => (req: Request) => handler(state.ctx, req),
   parseBody: async (req: Request, schema: { parse: Function }) => schema.parse(await req.json()) }));
@@ -30,6 +32,9 @@ beforeEach(() => {
   state.getArticle.mockReset().mockImplementation(async () => ({ ...state.article }));
   state.getBusiness.mockReset().mockResolvedValue({ name: "Care" }); state.listFacts.mockReset().mockResolvedValue([]);
   state.getActiveVoice.mockReset().mockResolvedValue(null); state.writeAudit.mockReset().mockResolvedValue(undefined);
+  state.listGateResults.mockReset().mockResolvedValue([{ gate: "brand", verdict: "warn", findings: [{ severity: "warn", message: "Use the approved style." }] }]);
+  state.getScore.mockReset().mockResolvedValue({ components: [] });
+  state.retrieve.mockReset().mockResolvedValue([{ content: "Approved business evidence.", sourceUrl: "https://care.example/about" }]);
   state.preview.mockReset().mockResolvedValue({ changes: [{ suggestionId: metadata.id, target: "metaDescription", before: "", after: metadata.value, changed: true },
     { suggestionId: section.id, target: "section", sectionId: "0", before: "Original opening.", after: "Revised opening.", changed: true }],
     patch: { metaDescription: metadata.value, bodyMarkdown: "Revised opening.\n\n## Planning\n\nOriginal planning." } });
@@ -57,6 +62,21 @@ describe("combined score improvement preview", () => {
     state.ctx.role = "viewer";
     await expect(POST(request())).rejects.toMatchObject({ code: "forbidden" });
     expect(state.getArticle).not.toHaveBeenCalled(); expect(state.preview).not.toHaveBeenCalled();
+  });
+  it("does not spend on knowledge retrieval when only selected metadata is being previewed", async () => {
+    await POST(request({ expectedVersion: 2, suggestions: [metadata] }));
+    expect(state.retrieve).not.toHaveBeenCalled();
+  });
+  it("prepares a whole-article action with current findings and evidence", async () => {
+    const whole = { id: "whole", title: "Improve all quality areas", reason: "Resolve brand and clarity findings.", priority: "high", target: "article", instruction: "Improve brand voice, factual grounding and readability throughout.", checks: ["brand", "facts", "readability"] };
+    await POST(request({ expectedVersion: 2, suggestions: [whole, metadata] }));
+    expect(state.preview).toHaveBeenCalledWith(expect.anything(), state.ctx, expect.objectContaining({ suggestions: [whole, metadata],
+      gates: [expect.objectContaining({ gate: "brand" })], evidence: [expect.objectContaining({ sourceUrl: "https://care.example/about" })] }));
+  });
+  it("rejects overlapping whole-article and section edits before spending AI budget", async () => {
+    const whole = { id: "whole", title: "Improve article", reason: "Resolve all findings.", priority: "high", target: "article", instruction: "Improve the full body." };
+    await expect(POST(request({ expectedVersion: 2, suggestions: [whole, section] }))).rejects.toThrow();
+    expect(state.preview).not.toHaveBeenCalled();
   });
   it("preserves tenant access checks", async () => {
     state.getArticle.mockRejectedValue(new AppError("not_found", "Not found"));

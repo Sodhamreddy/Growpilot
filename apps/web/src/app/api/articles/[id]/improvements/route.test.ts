@@ -6,15 +6,16 @@ const state = vi.hoisted(() => ({
   article: { id: "33333333-3333-4333-8333-333333333333", businessId: "44444444-4444-4444-8444-444444444444", topicId: null as string | null,
     version: 2, status: "needs_changes", updatedAt: new Date("2026-10-27T10:00:00Z"), title: "Home care questions", metaTitle: "Home care", metaDescription: null,
     bodyMarkdown: "A practical guide.\n\n## Cost questions\n\nAsk about your care plan.", seoScore: 69.6 as number | null },
-  getArticle: vi.fn(), getBusiness: vi.fn(), listFacts: vi.fn(), listGateResults: vi.fn(), getScore: vi.fn(), writeAudit: vi.fn(),
+  getArticle: vi.fn(), getBusiness: vi.fn(), listFacts: vi.fn(), listGateResults: vi.fn(), getScore: vi.fn(), getActiveVoice: vi.fn(), retrieve: vi.fn(), writeAudit: vi.fn(),
   propose: vi.fn(), select: vi.fn(), update: vi.fn(), insert: vi.fn(), queryResults: [] as unknown[][],
   options: null as unknown,
 }));
 vi.mock("@ob/db", async original => ({ ...await original<object>(), repo: {
   getArticle: state.getArticle, getBusiness: state.getBusiness, listFacts: state.listFacts,
-  listGateResults: state.listGateResults, getScore: state.getScore, writeAudit: state.writeAudit,
+  listGateResults: state.listGateResults, getScore: state.getScore, getActiveVoice: state.getActiveVoice, writeAudit: state.writeAudit,
 } }));
 vi.mock("@ob/blog", () => ({ suggestScoreImprovements: state.propose, splitSections: () => [{ id: "0" }, { id: "1" }] }));
+vi.mock("@ob/kb", () => ({ retrieve: state.retrieve }));
 vi.mock("@/lib/services", () => ({ db: () => ({ select: state.select, update: state.update, insert: state.insert }), getGateway: () => ({ kind: "gateway" }) }));
 vi.mock("@/lib/api", () => ({
   route: (handler: Function, options: unknown) => { state.options = options; return (req: Request) => handler(state.ctx, req); },
@@ -34,6 +35,8 @@ beforeEach(() => {
   state.getArticle.mockReset().mockImplementation(async () => ({ ...state.article }));
   state.getBusiness.mockReset().mockResolvedValue({ id: state.article.businessId, name: "Care", audience: "Families" });
   state.listFacts.mockReset().mockResolvedValue([{ key: "service", value: "Home care", confidence: 1, verified: true }]);
+  state.getActiveVoice.mockReset().mockResolvedValue(null);
+  state.retrieve.mockReset().mockResolvedValue([{ content: "The business offers home care consultations.", sourceUrl: "https://care.example/services" }]);
   state.listGateResults.mockReset().mockResolvedValue([{ gate: "seo", verdict: "warn", findings: [{ severity: "warn", message: "Meta description is missing." }] }]);
   state.getScore.mockReset().mockResolvedValue({ components: [{ key: "meta", label: "Metadata", weight: 10, score: 0, reasons: ["Missing description"] }] });
   state.writeAudit.mockReset().mockResolvedValue(undefined);
@@ -58,6 +61,8 @@ describe("AI score improvement suggestions", () => {
       facts: [expect.objectContaining({ key: "service", value: "Home care" })],
       gates: [expect.objectContaining({ gate: "seo", verdict: "warn" })],
       scoreComponents: [expect.objectContaining({ key: "meta", score: 0 })],
+      voice: null, currentVoiceScore: null, minimumVoiceScore: 70,
+      evidence: [expect.objectContaining({ sourceUrl: "https://care.example/services" })],
     }));
     expect(state.getArticle).toHaveBeenCalledTimes(2);
     expect(state.getArticle).toHaveBeenCalledWith(expect.anything(), state.ctx, state.article.id);
@@ -66,6 +71,13 @@ describe("AI score improvement suggestions", () => {
     expect(state.update).not.toHaveBeenCalled(); expect(state.insert).not.toHaveBeenCalled();
     expect(state.writeAudit).toHaveBeenCalledWith(expect.anything(), state.ctx, expect.objectContaining({ action: "article.score_improvements_proposed",
       after: { version: 2, currentScore: 69.6, minimumScore: 75, count: 1, targets: ["metaDescription"] } }));
+  });
+  it("includes the approved voice profile and its threshold alongside SEO findings", async () => {
+    const voice = { profile: { tone: ["warm", "plain"] }, bannedTerms: ["guaranteed"], preferredTerms: [{ use: "care consultation", insteadOf: "sales call" }], samples: [] };
+    state.getActiveVoice.mockResolvedValue(voice);
+    state.queryResults = [[{ settings: { minSeoScoreToPublish: 70, minVoiceScoreToPublish: 85 } }]];
+    expect(await POST(request())).toMatchObject({ hasVoiceProfile: true, minimumVoiceScore: 85 });
+    expect(state.propose).toHaveBeenCalledWith(expect.anything(), state.ctx, expect.objectContaining({ voice, minimumVoiceScore: 85 }));
   });
   it("keeps an unmeasured score null and defaults to the existing policy threshold", async () => {
     state.article.seoScore = null;

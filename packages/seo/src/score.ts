@@ -1,3 +1,4 @@
+import { containsKeyphrase, countKeyphrase } from "@ob/core";
 import { countWords } from "./parse/html.js";
 
 /**
@@ -162,8 +163,8 @@ function scoreContentQuality(input: ScoreInput): ScoreComponent {
 function scoreOnPage(input: ScoreInput): ScoreComponent {
   const reasons: string[] = [];
   let score = 0;
+  // Keyword checks read like a search engine: small connecting words and punctuation are ignored.
   const kw = input.primaryKeyword.toLowerCase().trim();
-  const title = (input.title ?? "").toLowerCase();
   const meta = input.metaDescription ?? "";
 
   // Title (35).
@@ -171,7 +172,7 @@ function scoreOnPage(input: ScoreInput): ScoreComponent {
     reasons.push("No title set.");
   } else {
     const len = input.title.length;
-    if (kw && title.includes(kw)) { score += 20; reasons.push("Primary keyword appears in the title."); }
+    if (kw && containsKeyphrase(input.title, kw)) { score += 20; reasons.push("Primary keyword appears in the title."); }
     else if (kw) { reasons.push("Primary keyword is missing from the title."); }
     if (len >= 30 && len <= 60) { score += 15; reasons.push(`Title length is ${len} characters (ideal 30–60).`); }
     else { score += 5; reasons.push(`Title is ${len} characters; aim for 30–60 to avoid truncation.`); }
@@ -183,19 +184,18 @@ function scoreOnPage(input: ScoreInput): ScoreComponent {
   } else {
     if (meta.length >= 120 && meta.length <= 160) { score += 15; reasons.push(`Meta description is ${meta.length} characters (ideal 120–160).`); }
     else { score += 6; reasons.push(`Meta description is ${meta.length} characters; aim for 120–160.`); }
-    if (kw && meta.toLowerCase().includes(kw)) { score += 10; reasons.push("Primary keyword appears in the meta description."); }
+    if (kw && containsKeyphrase(meta, kw)) { score += 10; reasons.push("Primary keyword appears in the meta description."); }
   }
 
   // H1 (15).
   const h1 = input.headings.find((h) => h.level === 1);
   if (!h1) reasons.push("No H1 heading.");
-  else if (kw && h1.text.toLowerCase().includes(kw)) { score += 15; reasons.push("Primary keyword appears in the H1."); }
+  else if (kw && containsKeyphrase(h1.text, kw)) { score += 15; reasons.push("Primary keyword appears in the H1."); }
   else { score += 7; reasons.push("H1 present but does not contain the primary keyword."); }
 
   // Keyword usage in body (15) — rewards presence, penalises stuffing.
-  const body = input.bodyMarkdown.toLowerCase();
   const words = Math.max(1, countWords(input.bodyMarkdown));
-  const occurrences = kw ? countOccurrences(body, kw) : 0;
+  const occurrences = kw ? countKeyphrase(input.bodyMarkdown, kw) : 0;
   const density = (occurrences * kw.split(/\s+/).length) / words;
   if (occurrences === 0 && kw) {
     reasons.push("Primary keyword does not appear in the body.");
@@ -211,7 +211,7 @@ function scoreOnPage(input: ScoreInput): ScoreComponent {
   }
 
   // Secondary coverage (10).
-  const covered = input.secondaryKeywords.filter((t) => body.includes(t.toLowerCase()));
+  const covered = input.secondaryKeywords.filter((t) => containsKeyphrase(input.bodyMarkdown, t));
   if (input.secondaryKeywords.length > 0) {
     const ratio = covered.length / input.secondaryKeywords.length;
     score += Math.round(ratio * 10);
@@ -349,15 +349,4 @@ function clamp(n: number): number {
 
 function round1(n: number): number {
   return Math.round(n * 10) / 10;
-}
-
-function countOccurrences(haystack: string, needle: string): number {
-  if (!needle) return 0;
-  let count = 0;
-  let idx = haystack.indexOf(needle);
-  while (idx !== -1) {
-    count++;
-    idx = haystack.indexOf(needle, idx + needle.length);
-  }
-  return count;
 }

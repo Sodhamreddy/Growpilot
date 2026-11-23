@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { cache } from "react";
 import { cookies, headers } from "next/headers";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, asc, eq, gt, isNull } from "drizzle-orm";
 import {
   config, newToken, newCorrelationId, unauthorized, forbidden,
   hashPassword, hashPasswordAsync, verifyPasswordAsync, slugify,
@@ -112,6 +112,8 @@ export async function signInWithEmail(input: {
     .from(users)
     .leftJoin(workspaceMembers, eq(workspaceMembers.userId, users.id))
     .where(eq(users.emailNormalized, normalizeEmail(input.email)))
+    // Someone invited into other workspaces lands in the first one they joined, every time.
+    .orderBy(asc(workspaceMembers.createdAt))
     .limit(1);
 
   const user = account?.user;
@@ -178,6 +180,7 @@ export async function signInWithGoogle(input: {
       .select({ workspaceId: workspaceMembers.workspaceId })
       .from(workspaceMembers)
       .where(eq(workspaceMembers.userId, existing.id))
+      .orderBy(asc(workspaceMembers.createdAt))
       .limit(1);
 
     if (!membership) throw forbidden("This account is not a member of any workspace.");
@@ -355,6 +358,35 @@ export async function createSession(auth: AuthResult): Promise<void> {
     path: "/",
     maxAge: SESSION_TTL_MS / 1000,
   });
+}
+
+/**
+ * Move the current session to another workspace the person belongs to.
+ *
+ * The membership is checked here rather than trusted from the caller: the role
+ * always comes from the membership row, so pointing the session at a workspace
+ * the user is not in would only make every request fail — but it must never be
+ * possible in the first place.
+ */
+export async function setActiveWorkspace(workspaceId: string): Promise<void> {
+  const store = await cookies();
+  const token = store.get(COOKIE_NAME)?.value;
+  if (!token) throw unauthorized();
+  const database = db();
+  const [session] = await database.select({ id: sessions.id, userId: sessions.userId }).from(sessions)
+    .where(and(eq(sessions.tokenHash, hashToken(token)), gt(sessions.expiresAt, new Date()))).limit(1);
+  if (!session) throw unauthorized();
+  const [membership] = await database.select({ workspaceId: workspaceMembers.workspaceId }).from(workspaceMembers)
+    .where(and(eq(workspaceMembers.userId, session.userId), eq(workspaceMembers.workspaceId, workspaceId))).limit(1);
+  if (!membership) throw forbidden("You are not a member of that workspace.");
+  await database.update(sessions).set({ activeWorkspaceId: workspaceId }).where(eq(sessions.id, session.id));
+}
+
+/** Every workspace this person belongs to, in the order they joined — for the workspace switcher. */
+export async function listMemberships(userId: string): Promise<{ id: string; name: string; role: Role }[]> {
+  return db().select({ id: workspaces.id, name: workspaces.name, role: workspaceMembers.role })
+    .from(workspaceMembers).innerJoin(workspaces, eq(workspaces.id, workspaceMembers.workspaceId))
+    .where(eq(workspaceMembers.userId, userId)).orderBy(asc(workspaceMembers.createdAt));
 }
 
 export async function destroySession(): Promise<void> {

@@ -69,7 +69,7 @@ export interface GateContext {
 export interface GateRunResult {
   gates: GateResult[];
   score: ScoreResult;
-  voiceScore: number;
+  voiceScore: number | null;
   /** True only if no gate failed and policy permits publication. */
   publishable: boolean;
   blockingReasons: string[];
@@ -404,7 +404,7 @@ export function runRiskGate(ctx: GateContext): GateResult {
 export function runPublishingGate(
   ctx: GateContext,
   seoScore: number,
-  voiceScore: number,
+  voiceScore: number | null,
 ): GateResult {
   const findings: GateFinding[] = [];
   const s = ctx.settings;
@@ -419,10 +419,11 @@ export function runPublishingGate(
   }
 
   const minVoice = s.minVoiceScoreToPublish ?? 70;
-  if (ctx.voice && voiceScore < minVoice) {
+  if (ctx.voice && (voiceScore === null || voiceScore < minVoice)) {
     findings.push({
       severity: "error",
-      message: `Brand voice score is ${voiceScore}, below this workspace's minimum of ${minVoice}.`,
+      message: voiceScore === null ? "Brand voice has not been checked against the approved profile."
+        : `Brand voice score is ${voiceScore}, below this workspace's minimum of ${minVoice}.`,
       suggestion: "Revise the draft to match the approved brand voice, then run quality checks again.",
     });
   }
@@ -470,7 +471,7 @@ export async function runAllGates(
 
   const brand = runBrandGate(ctx, opts.toneMatchScore);
   gates.push(brand);
-  const voiceScore = brand.score ?? 0;
+  const voiceScore = brand.score;
 
   const seo = runSeoGate(ctx);
   if (!opts.skipLlmGates) {

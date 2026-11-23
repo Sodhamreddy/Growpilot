@@ -1,54 +1,48 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { IconSpark } from "./Icons";
 import { LoadingIndicator } from "./LoadingIndicator";
 import styles from "./ArticleScoreImprovements.module.css";
 
+/**
+ * "Improve article with AI": one flow, one decision.
+ *
+ *   Find improvements → AI reviews the draft and writes the fixes (two requests,
+ *   about a minute) → every change is listed with its before/after, ticked →
+ *   Apply → saved as one new version, quality checks run again.
+ *
+ * Nothing is saved until Apply. Unticking a change composes the rest again on the
+ * server from the text already written, without another AI request. Changes the AI
+ * could not make safely, and work only a person can do, are listed apart, folded away.
+ */
+
 type MetadataTarget = "title" | "metaTitle" | "metaDescription";
-interface ImprovementSuggestion {
-  id: string;
-  title: string;
-  reason: string;
-  priority: "high" | "medium" | "low";
-  target: MetadataTarget | "section";
-  sectionId?: string;
-  instruction?: string;
-  value?: string;
+type Target = MetadataTarget | "section" | "article";
+type Area = "seo" | "brand" | "facts" | "readability" | "links" | "conversion" | "risk" | "publishing";
+const AREA_LABELS: Record<Area, string> = {
+  seo: "SEO", brand: "Brand voice", facts: "Facts", readability: "Readability", links: "Links & sources",
+  conversion: "Call to action", risk: "Sensitive topics", publishing: "Publishing",
+};
+const TARGET_LABELS: Record<Target, string> = {
+  title: "Article title", metaTitle: "SEO title", metaDescription: "Meta description", section: "Article text", article: "Whole article",
+};
+
+interface Suggestion {
+  id: string; title: string; reason: string; priority: "high" | "medium" | "low"; target: Target;
+  checks?: Area[]; sectionId?: string; instruction?: string; value?: string;
 }
-interface ImprovementResult {
-  expectedVersion: number;
-  currentScore: number | null;
-  minimumScore: number;
-  summary: string;
-  suggestions: ImprovementSuggestion[];
+interface Plan {
+  expectedVersion: number; currentScore: number | null; minimumScore: number; hasVoiceProfile?: boolean;
+  summary: string; suggestions: Suggestion[]; followUps?: { area: Area; message: string; action: string }[];
 }
-interface PreparedChange {
-  suggestionId: string;
-  target: ImprovementSuggestion["target"];
-  sectionId?: string;
-  before: string;
-  after: string;
-  changed: boolean;
-}
-interface ImprovementPatch {
-  title?: string;
-  metaTitle?: string | null;
-  metaDescription?: string | null;
-  bodyMarkdown?: string;
-}
-interface BatchPreview {
-  expectedVersion: number;
-  changes: PreparedChange[];
-  patch: ImprovementPatch;
-  allSuggestions: boolean;
-}
-interface BatchPreviewResponse {
-  expectedVersion: number;
-  changes: PreparedChange[];
-  patch: ImprovementPatch;
-}
+interface Change { suggestionId: string; target: Target; sectionId?: string; before: string; after: string; changed: boolean; skipped?: string }
+interface Patch { title?: string; metaTitle?: string | null; metaDescription?: string | null; bodyMarkdown?: string }
+interface Prepared { changes: Change[]; patch: Patch }
+interface Applied { version: number; count: number; qaQueued: boolean; warning?: string }
+
+type Phase = "idle" | "reviewing" | "writing" | "ready" | "applying";
 
 export interface ArticleScoreImprovementsProps {
   articleId: string;
@@ -59,268 +53,279 @@ export interface ArticleScoreImprovementsProps {
   onApplyingChange?: (applying: boolean) => void;
 }
 
-class ImprovementRequestError extends Error {
+class RequestError extends Error {
   constructor(message: string, readonly status: number) { super(message); }
 }
 
-const TARGET_LABELS = {
-  title: "Article title", metaTitle: "SEO title", metaDescription: "Meta description", section: "Article content",
-};
-const scoreLabel = (score: number) => score.toLocaleString("en-US", { maximumFractionDigits: 1 });
+/*
+ * The note about the last save outlives the page.
+ *
+ * Saving makes a new version, and the article page rebuilds its whole review area
+ * for a new version, so component state cannot carry "Applied 5 changes" across.
+ * It is kept briefly in this tab's session instead, and the review area reopens
+ * this panel when it finds one (see `recentImprovement`).
+ */
+const NOTE_KEY = (articleId: string) => `growpilot:improve-applied:${articleId}`;
+const NOTE_TTL_MS = 10 * 60_000;
 
-/** A saved article version owns its selections and previews. */
-export function ArticleScoreImprovements(props: ArticleScoreImprovementsProps) {
-  return <ImprovementSession key={`${props.articleId}:${props.version}`} {...props} />;
+/** The last "Improve with AI" save for this article in this tab, if recent. */
+export function recentImprovement(articleId: string, version?: number): Applied | null {
+  try {
+    const note = JSON.parse(sessionStorage.getItem(NOTE_KEY(articleId)) ?? "null") as (Applied & { at: number }) | null;
+    if (!note || Date.now() - note.at > NOTE_TTL_MS || (version !== undefined && note.version !== version)) return null;
+    return note;
+  } catch { return null; }
+}
+function rememberImprovement(articleId: string, applied: Applied | null) {
+  try {
+    if (applied) sessionStorage.setItem(NOTE_KEY(articleId), JSON.stringify({ ...applied, at: Date.now() }));
+    else sessionStorage.removeItem(NOTE_KEY(articleId));
+  } catch { /* A private window may refuse storage; the save itself is unaffected. */ }
 }
 
-function ImprovementSession({ articleId, version, onApplied, onClose, onApplyingChange }: ArticleScoreImprovementsProps) {
+/** Each saved version gets a fresh session. */
+export function ArticleScoreImprovements(props: ArticleScoreImprovementsProps) {
+  const [applied, setApplied] = useState<Applied | null>(null);
+  // Read after mount: the server render has no session storage.
+  useEffect(() => { setApplied(recentImprovement(props.articleId, props.version)); }, [props.articleId, props.version]);
+  return <Session key={`${props.articleId}:${props.version}`} {...props} applied={applied}
+    onSaved={note => { rememberImprovement(props.articleId, note); setApplied(note); }}
+    onDismiss={() => { rememberImprovement(props.articleId, null); setApplied(null); }} />;
+}
+
+function Session({ articleId, version, onApplied, onClose, onApplyingChange, applied, onSaved, onDismiss }: ArticleScoreImprovementsProps & {
+  applied: Applied | null; onSaved: (applied: Applied) => void; onDismiss: () => void;
+}) {
   const router = useRouter();
-  const headingId = useId();
-  const previewId = useId();
-  const [result, setResult] = useState<ImprovementResult | null>(null);
-  const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [preview, setPreview] = useState<BatchPreview | null>(null);
-  const [busy, setBusy] = useState<"suggest" | "preview" | "apply" | null>(null);
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [plan, setPlan] = useState<Plan | null>(null);
+  const [prepared, setPrepared] = useState<Prepared | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [stale, setStale] = useState(false);
-  const [done, setDone] = useState("");
-  const [qaWarning, setQaWarning] = useState("");
-  const [appliedVersion, setAppliedVersion] = useState<number | null>(null);
-  const mounted = useRef(true);
-  const locked = useRef(false);
+  const [saved, setSaved] = useState(false);
   const request = useRef<AbortController | null>(null);
-  const previewHeading = useRef<HTMLHeadingElement>(null);
-  const selectAllInput = useRef<HTMLInputElement>(null);
-  const selected = result?.suggestions.filter(suggestion => selectedIds.includes(suggestion.id)) ?? [];
-  const allSelected = Boolean(result?.suggestions.length) && selected.length === result?.suggestions.length;
-  const changedCount = preview?.changes.filter(change => change.changed).length ?? 0;
-  const aimScore = result ? Math.min(100, Math.max(85, result.minimumScore + 5)) : null;
 
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; request.current?.abort(); };
-  }, []);
-  useEffect(() => { if (preview) previewHeading.current?.focus(); }, [preview]);
-  useEffect(() => {
-    if (selectAllInput.current) selectAllInput.current.indeterminate = selected.length > 0 && !allSelected;
-  }, [selected.length, allSelected]);
-  useEffect(() => { onApplyingChange?.(busy === "apply" || appliedVersion !== null); }, [busy, appliedVersion, onApplyingChange]);
+  useEffect(() => () => request.current?.abort(), []);
+  useEffect(() => { onApplyingChange?.(phase === "applying" || saved); }, [phase, saved, onApplyingChange]);
   useEffect(() => () => onApplyingChange?.(false), [onApplyingChange]);
 
-  function start(kind: NonNullable<typeof busy>) {
-    if (locked.current || stale || appliedVersion !== null) return null;
-    locked.current = true;
+  const suggestionFor = (id: string) => plan?.suggestions.find(suggestion => suggestion.id === id);
+  const usable = prepared?.changes.filter(change => change.changed && !change.skipped) ?? [];
+  const leftOut = prepared?.changes.filter(change => !change.changed || change.skipped) ?? [];
+  const chosen = usable.filter(change => selected.includes(change.suggestionId));
+  const busy = phase === "reviewing" || phase === "writing" || phase === "applying";
+
+  async function send<T>(url: string, body: unknown, method = "POST"): Promise<T> {
+    request.current?.abort();
     const controller = new AbortController();
     request.current = controller;
-    setBusy(kind); setError(""); setDone(""); setQaWarning("");
-    return controller;
-  }
-  function finish(controller: AbortController) {
-    if (request.current !== controller) return;
-    request.current = null;
-    locked.current = false;
-    if (mounted.current) setBusy(null);
-  }
-  function showError(error: unknown, controller: AbortController) {
-    if (!mounted.current || controller.signal.aborted) return;
-    if (error instanceof ImprovementRequestError && error.status === 409) {
-      setStale(true); setResult(null); setPreview(null); setSelectedIds([]);
-    }
-    setError(error instanceof Error ? error.message : "Could not reach the server. Please try again.");
-  }
-  async function send<T>(url: string, body: unknown, controller: AbortController, method = "POST"): Promise<T> {
-    const response = await fetch(url, { method, headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body), signal: controller.signal });
-    let data: unknown;
-    try { data = await response.json(); }
-    catch { throw new ImprovementRequestError("The server returned an unreadable response. Please try again.", response.status); }
+    const response = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
+    const data = await response.json().catch(() => null) as { error?: { message?: string } } | null;
     if (!response.ok) {
-      const message = (data as { error?: { message?: string } }).error?.message;
-      throw new ImprovementRequestError(message || (response.status === 401 ? "Your session ended. Sign in again to continue." : "That request did not finish. Please try again."), response.status);
+      throw new RequestError(data?.error?.message || (response.status === 401 ? "Your session ended. Sign in again to continue." : "That did not finish. Please try again."), response.status);
     }
     return data as T;
   }
 
-  function select(ids: string[] | ((current: string[]) => string[])) {
-    if (locked.current || stale || appliedVersion !== null) return;
-    setSelectedIds(ids); setPreview(null); setError(""); setDone("");
-  }
-  function toggle(suggestionId: string, checked: boolean) {
-    select(current => checked ? [...current.filter(id => id !== suggestionId), suggestionId] : current.filter(id => id !== suggestionId));
-  }
-  function refreshArticle() {
-    if (locked.current) return;
-    // A QA rerun can change findings without changing the article version.
-    // Permit a fresh plan after an explicit refresh, while discarding every old proposal.
-    if (appliedVersion === null) {
-      setStale(false); setResult(null); setPreview(null); setSelectedIds([]); setError("");
-    }
-    router.refresh();
+  function fail(err: unknown) {
+    if (err instanceof DOMException && err.name === "AbortError") return;
+    if (err instanceof RequestError && err.status === 409) { setStale(true); setPlan(null); setPrepared(null); }
+    setError(err instanceof Error ? err.message : "Could not reach the server. Please try again.");
+    setPhase(prepared && !(err instanceof RequestError && err.status === 409) ? "ready" : "idle");
   }
 
-  async function suggest() {
-    const controller = start("suggest");
-    if (!controller) return;
-    setResult(null); setPreview(null); setSelectedIds([]);
+  /** Step 1: what should change. Step 2: the changed text itself, for review. */
+  async function findImprovements() {
+    onDismiss();
+    setError(""); setPlan(null); setPrepared(null); setSelected([]);
     try {
-      const data = await send<ImprovementResult>(`/api/articles/${articleId}/improvements`, { expectedVersion: version }, controller);
-      if (!mounted.current || controller.signal.aborted) return;
-      if (data.expectedVersion !== version) throw new ImprovementRequestError("This draft changed. Refresh the article for current suggestions.", 409);
-      if (!Array.isArray(data.suggestions) || (data.currentScore !== null && !Number.isFinite(data.currentScore)) || !Number.isFinite(data.minimumScore)) throw new Error("The suggestions could not be read. Please try again.");
-      setResult(data); setSelectedIds(data.suggestions.map(suggestion => suggestion.id));
-    } catch (error) { showError(error, controller); }
-    finally { finish(controller); }
-  }
-
-  async function previewChanges(includeAll = false) {
-    if (!result || result.expectedVersion !== version) return;
-    const chosen = includeAll ? result.suggestions : selected;
-    if (!chosen.length) return;
-    const controller = start("preview");
-    if (!controller) return;
-    setPreview(null);
-    if (includeAll) setSelectedIds(chosen.map(suggestion => suggestion.id));
-    try {
-      const data = await send<BatchPreviewResponse>(`/api/articles/${articleId}/improvements/preview`,
-        { expectedVersion: version, suggestions: chosen }, controller);
-      if (!mounted.current || controller.signal.aborted) return;
-      if (data.expectedVersion !== version) throw new ImprovementRequestError("This draft changed. Refresh before reviewing these improvements.", 409);
-      const requested = new Map(chosen.map(suggestion => [suggestion.id, suggestion]));
-      const seen = new Set<string>();
-      if (!Array.isArray(data.changes) || !data.changes.length || data.changes.length !== chosen.length ||
-        data.changes.some(change => {
-          if (!change || typeof change !== "object") return true;
-          const original = requested.get(change.suggestionId);
-          if (!original || seen.has(change.suggestionId) || change.target !== original.target ||
-            change.sectionId !== original.sectionId || typeof change.before !== "string" || typeof change.after !== "string" || typeof change.changed !== "boolean") return true;
-          seen.add(change.suggestionId);
-          return false;
-        })) throw new Error("The proposed changes could not be read. Please preview them again.");
-      const patch = readPatch(data.patch);
-      if (!patch || (data.changes.some(change => change.changed) && !Object.keys(patch).length)) throw new Error("The proposed changes could not be prepared. Please try again.");
-      const reviewedFields = new Set(data.changes.map(change => change.target === "section" ? "bodyMarkdown" : change.target));
-      if (Object.keys(patch).some(field => !reviewedFields.has(field as MetadataTarget | "bodyMarkdown"))) throw new Error("The preview included an unexpected change. Please request a fresh preview.");
-      setPreview({ expectedVersion: data.expectedVersion, changes: data.changes, patch,
-        allSuggestions: chosen.length === result.suggestions.length });
-    } catch (error) { showError(error, controller); }
-    finally { finish(controller); }
+      setPhase("reviewing");
+      const found = await send<Plan>(`/api/articles/${articleId}/improvements`, { expectedVersion: version });
+      if (found.expectedVersion !== version) throw new RequestError("This draft changed. Refresh to start again.", 409);
+      if (!Array.isArray(found.suggestions)) throw new Error("The suggestions could not be read. Please try again.");
+      setPlan(found);
+      if (!found.suggestions.length) { setPrepared({ changes: [], patch: {} }); setPhase("ready"); return; }
+      setPhase("writing");
+      const ready = await send<Prepared & { expectedVersion: number }>(`/api/articles/${articleId}/improvements/preview`,
+        { expectedVersion: version, suggestions: found.suggestions });
+      const changes = readChanges(ready.changes, found.suggestions);
+      const patch = readPatch(ready.patch);
+      if (!changes || !patch) throw new Error("The prepared changes could not be read. Please try again.");
+      setPrepared({ changes, patch });
+      setSelected(changes.filter(change => change.changed && !change.skipped).map(change => change.suggestionId));
+      setPhase("ready");
+    } catch (err) { fail(err); }
   }
 
   async function applyChanges() {
-    if (!preview || !changedCount || preview.expectedVersion !== version) return;
-    const controller = start("apply");
-    if (!controller) return;
+    if (!plan || !prepared || !chosen.length) return;
+    setError("");
     try {
-      const data = await send<{ version: number; rescoreNeeded?: boolean; qaQueued?: boolean; qaWarning?: string }>(
-        `/api/articles/${articleId}`, { ...preview.patch, expectedVersion: preview.expectedVersion, runQualityChecks: true }, controller, "PATCH");
-      if (!mounted.current || controller.signal.aborted) return;
-      if (data.version === version) {
-        setPreview(null); setDone("The selected changes already match this draft. You can review another selection.");
+      setPhase("applying");
+      let patch = prepared.patch;
+      if (chosen.length !== usable.length) {
+        // A narrower selection: compose it again from the text already written, without AI.
+        const keep = new Set(chosen.map(change => change.suggestionId));
+        const subset = await send<Prepared>(`/api/articles/${articleId}/improvements/preview`, {
+          expectedVersion: version,
+          suggestions: plan.suggestions.filter(suggestion => keep.has(suggestion.id)),
+          prepared: chosen.filter(change => change.target === "section" || change.target === "article")
+            .map(change => ({ sectionId: change.sectionId ?? "article", content: change.after })),
+        });
+        const subsetPatch = readPatch(subset.patch);
+        if (!subsetPatch) throw new Error("The selected changes could not be prepared. Please try again.");
+        patch = subsetPatch;
+      }
+      const result = await send<{ version: number; qaQueued?: boolean; qaWarning?: string }>(`/api/articles/${articleId}`,
+        { ...patch, expectedVersion: version, runQualityChecks: true }, "PATCH");
+      if (!Number.isInteger(result.version) || result.version <= version) {
+        setPhase("ready"); setError("These changes already match the draft. Nothing new was saved.");
         return;
       }
-      if (!Number.isInteger(data.version) || data.version <= version) throw new Error("The save result could not be confirmed. Refresh the article before continuing.");
-      setAppliedVersion(data.version); setResult(null); setPreview(null); setSelectedIds([]);
-      setDone(`Saved ${changedCount} ${changedCount === 1 ? "change" : "changes"} together as version ${data.version}. ${data.qaQueued ? "Quality checks are queued to measure the updated score." : "Run quality checks to measure the updated score."}`);
-      if (data.qaWarning) setQaWarning(data.qaWarning);
+      setSaved(true);
+      onSaved({ version: result.version, count: chosen.length, qaQueued: Boolean(result.qaQueued), ...(result.qaWarning ? { warning: result.qaWarning } : {}) });
       router.refresh();
       onApplied?.();
-    } catch (error) { showError(error, controller); }
-    finally { finish(controller); }
+    } catch (err) { fail(err); }
   }
 
-  return <section className={styles.panel} aria-labelledby={headingId} aria-busy={Boolean(busy)}>
+  function startOver() {
+    request.current?.abort();
+    setPhase("idle"); setPlan(null); setPrepared(null); setSelected([]); setError("");
+  }
+  function toggle(id: string, on: boolean) {
+    setSelected(current => on ? [...current.filter(item => item !== id), id] : current.filter(item => item !== id));
+  }
+
+  return <section className={styles.panel} aria-labelledby={`${articleId}-improve-title`} aria-busy={busy}>
     <header className={styles.header}>
-      <div><h3 id={headingId}><IconSpark size={18} /> Improve your score with AI</h3>
-        <p>Choose improvements, preview them together, then apply the changes you want.</p></div>
-      {onClose && <button type="button" className={styles.close} aria-label="Close score improvement suggestions" disabled={busy === "apply" || appliedVersion !== null} onClick={onClose}>×</button>}
+      <h3 id={`${articleId}-improve-title`}><IconSpark size={18} /> Improve article with AI</h3>
+      {onClose && <button type="button" className={styles.close} aria-label="Close" disabled={phase === "applying" || saved} onClick={onClose}>×</button>}
     </header>
-    {appliedVersion === null && !stale && <div className={styles.requestRow}>
-      <button type="button" className={styles.primary} disabled={Boolean(busy)} onClick={() => void suggest()}>
-        {busy === "suggest" ? <LoadingIndicator label="Reviewing your draft…" /> : result ? "Get fresh suggestions" : "Suggest improvements"}
-      </button>
-      <span className={styles.note}>AI suggestions and previews use your workspace AI budget.</span>
-    </div>}
+
+    {applied && <p className={styles.success} role="status">
+      Applied {applied.count} {applied.count === 1 ? "change" : "changes"} as version {applied.version}.{" "}
+      {applied.qaQueued ? "Quality checks are running; the new score appears when they finish." : "Run quality checks to see the new score."}
+      {applied.warning && <><br />{applied.warning}</>}
+    </p>}
+    {saved && <p className={styles.note}><LoadingIndicator label="Saved. Loading the updated article…" /></p>}
     {error && <p className={styles.error} role="alert">{error}</p>}
-    {done && <p className={styles.success} role="status">{done}</p>}
-    {appliedVersion !== null && <p className={styles.note}><LoadingIndicator label="Loading updated article…" /></p>}
-    {qaWarning && <p className={styles.warning} role="status">Your changes are saved. {qaWarning}</p>}
-    {(stale || appliedVersion !== null) && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={refreshArticle}>Refresh article</button>}
-    {result && <>
-      <div className={styles.scoreRow}>
-        <span>Current score <strong>{result.currentScore === null ? "Not checked" : scoreLabel(result.currentScore)}</strong></span>
-        <span>Publishing minimum <strong>{scoreLabel(result.minimumScore)}</strong></span>
-        {result.currentScore !== null && aimScore !== null && result.currentScore >= aimScore
-          ? <span>Focus <strong>Further refinement</strong></span>
-          : <span>Writing aim <strong>{aimScore === 100 ? "100" : `${aimScore}+`}</strong></span>}
+
+    {stale && !saved && <div className={styles.block}>
+      <p className={styles.warning}>This draft changed while AI was working, so these changes no longer fit it.</p>
+      <button type="button" className={styles.button} onClick={() => { setStale(false); setError(""); router.refresh(); }}>Refresh article</button>
+    </div>}
+
+    {!stale && !saved && phase === "idle" && <div className={styles.block}>
+      <p className={styles.lead}>AI checks this draft against its quality findings and writes the fixes. You see every change before anything is saved.</p>
+      <div className={styles.actions}>
+        <button type="button" className={styles.primary} onClick={() => void findImprovements()}>Find improvements</button>
+        <span className={styles.note}>Takes about a minute. Uses your AI budget.</span>
       </div>
-      <p className={styles.goalNote}>AI can suggest further improvements above the publishing minimum. The new score is measured after the changes are saved.</p>
-      <p className={styles.summary}>{result.summary}</p>
-      {result.suggestions.length ? <>
-        <div className={styles.selectionBar} role="group" aria-label="Choose improvements">
-          <label className={styles.selectAll}><input type="checkbox" ref={selectAllInput} checked={allSelected} disabled={Boolean(busy)} onChange={event => select(event.target.checked ? result.suggestions.map(suggestion => suggestion.id) : [])} /> Select all</label>
-          <span className={styles.selectionCount} role="status">{selected.length} of {result.suggestions.length} selected</span>
-          <div className={styles.batchActions}>
-            <button type="button" className={styles.primary} disabled={Boolean(busy) || !selected.length} aria-controls={previewId} aria-expanded={Boolean(preview)} onClick={() => void previewChanges()}>
-              {busy === "preview" ? <LoadingIndicator label="Preparing changes…" /> : allSelected ? `Preview all (${selected.length})` : `Preview selected (${selected.length})`}
-            </button>
-            {!allSelected && <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => void previewChanges(true)}>Preview all</button>}
-          </div>
+    </div>}
+
+    {(phase === "reviewing" || phase === "writing") && <div className={styles.progress} role="status" aria-live="polite">
+      <ol>
+        <li data-state={phase === "reviewing" ? "active" : "done"}>Reviewing the draft</li>
+        <li data-state={phase === "writing" ? "active" : "waiting"}>Writing the changes</li>
+      </ol>
+      <LoadingIndicator label={phase === "reviewing" ? "Step 1 of 2: reviewing the draft…" : "Step 2 of 2: writing the changes…"} />
+    </div>}
+
+    {(phase === "ready" || phase === "applying") && plan && prepared && !saved && <div className={styles.block}>
+      <p className={styles.score}>
+        SEO score <strong>{plan.currentScore === null ? "not checked yet" : format(plan.currentScore)}</strong>
+        <span aria-hidden>·</span> minimum <strong>{format(plan.minimumScore)}</strong>
+        {plan.hasVoiceProfile === false && <><span aria-hidden>·</span> Brand voice <strong>not set up</strong></>}
+      </p>
+      {plan.summary && <p className={styles.summary}>{plan.summary}</p>}
+
+      {usable.length ? <>
+        <div className={styles.listHead}>
+          <strong>{usable.length} {usable.length === 1 ? "change" : "changes"} ready</strong>
+          {usable.length > 1 && <label className={styles.selectAll}>
+            <input type="checkbox" checked={chosen.length === usable.length} disabled={busy}
+              onChange={event => setSelected(event.target.checked ? usable.map(change => change.suggestionId) : [])} /> Select all
+          </label>}
         </div>
-        {busy === "preview" && <p className={styles.note} role="status">Preparing a combined preview of {selected.length} {selected.length === 1 ? "improvement" : "improvements"}…</p>}
-        <ol className={styles.suggestions} aria-label="Suggested improvements">{result.suggestions.map(suggestion => <li key={suggestion.id} className={styles.suggestion} data-selected={selectedIds.includes(suggestion.id)}>
-          <label className={styles.suggestionChoice}><input type="checkbox" checked={selectedIds.includes(suggestion.id)} disabled={Boolean(busy)} aria-label={`Select improvement: ${suggestion.title}`} onChange={event => toggle(suggestion.id, event.target.checked)} />
-            <span><span className={styles.priority} data-priority={suggestion.priority}>{suggestion.priority} priority</span><span className={styles.target}>{TARGET_LABELS[suggestion.target]}</span><strong>{suggestion.title}</strong></span>
-          </label>
-          <p className={styles.reason}>{suggestion.reason}</p>
-        </li>)}</ol>
-      </> : <p className={styles.note}>No supported changes were suggested. Review the quality findings or ask again after updating the draft.</p>}
-      {preview && <div id={previewId} className={styles.preview}>
-        <h4 tabIndex={-1} ref={previewHeading}>Review {preview.allSuggestions ? "all" : "your selected"} improvements</h4>
-        <p className={styles.note}>These changes will be saved together in one new version. Nothing has been saved yet.</p>
-        <div className={styles.preparedChanges}>{preview.changes.map(change => {
-          const suggestion = result.suggestions.find(item => item.id === change.suggestionId);
-          return <section className={styles.preparedChange} key={change.suggestionId} aria-label={suggestion?.title ?? TARGET_LABELS[change.target]}>
-            <h5>{suggestion?.title ?? TARGET_LABELS[change.target]}{!change.changed && <span className={styles.unchanged}>No change</span>}</h5>
-            <div className={styles.comparison}>
-              <div><h6>Current</h6><div className={styles.changeText}>{change.before || "Not set"}</div></div>
-              <div><h6>Proposed</h6><div className={`${styles.changeText} ${styles.proposed}`}>{change.after || "Not set"}</div></div>
-            </div>
-          </section>;
-        })}</div>
-        {!changedCount && <p className={styles.note}>The selected items already match the draft. Choose other suggestions or edit the draft directly.</p>}
-        <div className={styles.previewActions}>
-          <button type="button" className={styles.primary} disabled={Boolean(busy) || !changedCount} onClick={() => void applyChanges()}>
-            {busy === "apply" ? <LoadingIndicator label="Saving changes…" /> : preview.allSuggestions ? `Apply all (${changedCount})` : `Apply selected (${changedCount})`}
-          </button>
-          <button type="button" className={styles.button} disabled={Boolean(busy)} onClick={() => setPreview(null)}>Back to suggestions</button>
-        </div>
-        <p className={styles.note}>Quality checks run again after applying. Review their result before approving the article.</p>
-      </div>}
-      <p className={styles.note}>Suggestions are based on saved version {result.expectedVersion}. You can improve the draft further after reviewing the new score.</p>
-    </>}
+        <ul className={styles.changes}>{usable.map(change => {
+          const suggestion = suggestionFor(change.suggestionId);
+          const on = selected.includes(change.suggestionId);
+          const short = change.target !== "section" && change.target !== "article";
+          return <li key={change.suggestionId} className={styles.change} data-selected={on}>
+            <label className={styles.changeTitle}>
+              <input type="checkbox" checked={on} disabled={busy} onChange={event => toggle(change.suggestionId, event.target.checked)} />
+              <span><strong>{suggestion?.title ?? TARGET_LABELS[change.target]}</strong><span className={styles.tag}>{TARGET_LABELS[change.target]}</span></span>
+            </label>
+            {suggestion?.reason && <p className={styles.reason}>{suggestion.reason}</p>}
+            {short
+              ? <div className={styles.inline}><span className={styles.before}>{change.before || "Not set"}</span><span aria-hidden>→</span><span className={styles.after}>{change.after}</span></div>
+              : <details className={styles.details}><summary>Show the rewritten text</summary>
+                <div className={styles.compare}>
+                  <div><h6>Now</h6><div className={styles.text}>{change.before}</div></div>
+                  <div><h6>After</h6><div className={`${styles.text} ${styles.afterText}`}>{change.after}</div></div>
+                </div>
+              </details>}
+          </li>;
+        })}</ul>
+      </> : <p className={styles.lead}>No text changes are needed right now.{plan.followUps?.length ? " The items below need a person." : ""}</p>}
+
+      {leftOut.length > 0 && <details className={styles.fold}>
+        <summary>{leftOut.length} {leftOut.length === 1 ? "suggestion" : "suggestions"} left out</summary>
+        <ul>{leftOut.map(change => <li key={change.suggestionId}>
+          <strong>{suggestionFor(change.suggestionId)?.title ?? TARGET_LABELS[change.target]}</strong>
+          <span>{change.skipped ?? "No change was needed."}</span>
+        </li>)}</ul>
+      </details>}
+
+      {Boolean(plan.followUps?.length) && <details className={`${styles.fold} ${styles.attention}`}>
+        <summary>Needs your input ({plan.followUps!.length})</summary>
+        <ul>{plan.followUps!.map((item, index) => <li key={`${item.area}:${index}`}>
+          <strong>{AREA_LABELS[item.area] ?? item.area}</strong><span>{item.message}</span><span className={styles.action}>{item.action}</span>
+        </li>)}</ul>
+      </details>}
+
+      <div className={styles.footer}>
+        {usable.length > 0 && <button type="button" className={styles.primary} disabled={busy || !chosen.length} onClick={() => void applyChanges()}>
+          {phase === "applying" ? <LoadingIndicator label="Saving…" /> : `Apply ${chosen.length} ${chosen.length === 1 ? "change" : "changes"}`}
+        </button>}
+        <button type="button" className={styles.button} disabled={busy} onClick={startOver}>Start over</button>
+      </div>
+      {usable.length > 0 && <p className={styles.note}>Saved as a new version of the draft. Quality checks run again automatically.</p>}
+    </div>}
   </section>;
 }
 
-/** Only the fields shown in the combined preview can be submitted to the normal editor. */
-function readPatch(value: unknown): ImprovementPatch | null {
+const format = (score: number) => score.toLocaleString("en-US", { maximumFractionDigits: 1 });
+
+/** The prepared changes, if they are the ones asked for and well formed. */
+function readChanges(value: unknown, suggestions: Suggestion[]): Change[] | null {
+  if (!Array.isArray(value)) return null;
+  const ids = new Set(suggestions.map(suggestion => suggestion.id));
+  const seen = new Set<string>();
+  for (const change of value as Change[]) {
+    if (!change || typeof change !== "object" || !ids.has(change.suggestionId) || seen.has(change.suggestionId)
+      || typeof change.before !== "string" || typeof change.after !== "string" || typeof change.changed !== "boolean") return null;
+    seen.add(change.suggestionId);
+  }
+  return value as Change[];
+}
+
+/** Only the fields an article edit accepts. */
+function readPatch(value: unknown): Patch | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
-  const patch: ImprovementPatch = {};
-  if (raw["title"] !== undefined) {
-    if (typeof raw["title"] !== "string") return null;
-    patch.title = raw["title"];
+  const patch: Patch = {};
+  for (const key of ["title", "bodyMarkdown"] as const) {
+    if (raw[key] === undefined) continue;
+    if (typeof raw[key] !== "string") return null;
+    patch[key] = raw[key] as string;
   }
-  if (raw["metaTitle"] !== undefined) {
-    if (raw["metaTitle"] !== null && typeof raw["metaTitle"] !== "string") return null;
-    patch.metaTitle = raw["metaTitle"] as string | null;
-  }
-  if (raw["metaDescription"] !== undefined) {
-    if (raw["metaDescription"] !== null && typeof raw["metaDescription"] !== "string") return null;
-    patch.metaDescription = raw["metaDescription"] as string | null;
-  }
-  if (raw["bodyMarkdown"] !== undefined) {
-    if (typeof raw["bodyMarkdown"] !== "string") return null;
-    patch.bodyMarkdown = raw["bodyMarkdown"];
+  for (const key of ["metaTitle", "metaDescription"] as const) {
+    if (raw[key] === undefined) continue;
+    if (raw[key] !== null && typeof raw[key] !== "string") return null;
+    patch[key] = raw[key] as string | null;
   }
   return patch;
 }

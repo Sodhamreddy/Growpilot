@@ -1,6 +1,6 @@
 import {
   pgTable, pgEnum, text, uuid, timestamp, integer, real, boolean,
-  jsonb, index, uniqueIndex, primaryKey, vector, bigint, type AnyPgColumn,
+  jsonb, index, uniqueIndex, primaryKey, foreignKey, vector, bigint, type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 import { relations, sql } from "drizzle-orm";
 
@@ -105,6 +105,16 @@ export interface WorkspaceSettings {
   minSeoScoreToPublish?: number;
   minVoiceScoreToPublish?: number;
   /**
+   * How a blog article gets approved.
+   *
+   * "single" (the default): one editor or admin approves, an admin publishes.
+   * "team": three levels, each signed off by its own people — the Content team
+   * approves the draft, a Manager gives the final approval or sends it back,
+   * then anyone on either team sends it to WordPress. Team membership lives in
+   * workspace_team_members; each sign-off is recorded in article_reviews.
+   */
+  reviewProcess?: "single" | "team";
+  /**
    * Answers collected during onboarding (spec §2.2). Stored here rather than in
    * their own table because they configure the workspace rather than describing
    * an entity — and because §2.2 requires autosave, which a jsonb patch does
@@ -159,6 +169,51 @@ export const workspaceMembers = pgTable("workspace_members", {
 }, (t) => [
   primaryKey({ columns: [t.workspaceId, t.userId] }),
   index("wm_user_idx").on(t.userId),
+]);
+
+/** The three review teams of the team review process (see WorkspaceSettings.reviewProcess). */
+export type ReviewTeamKey = "content" | "manager";
+
+/**
+ * Who is on which review team.
+ *
+ * Keyed on the membership, not the user: leaving the workspace removes a person
+ * from its teams too, so a former colleague can never be the one a level waits on.
+ */
+export const workspaceTeamMembers = pgTable("workspace_team_members", {
+  workspaceId: uuid("workspace_id").notNull(),
+  userId: uuid("user_id").notNull(),
+  team: text("team").$type<ReviewTeamKey>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.workspaceId, t.userId, t.team] }),
+  foreignKey({ columns: [t.workspaceId, t.userId], foreignColumns: [workspaceMembers.workspaceId, workspaceMembers.userId] }).onDelete("cascade"),
+]);
+
+/**
+ * An invitation to join a workspace.
+ *
+ * Only a SHA-256 of the link's token is stored, like sessions and password
+ * resets: a database dump must not hand anyone a working way into a workspace.
+ * The link is shown once, to the admin who created it, to send on themselves.
+ */
+export const workspaceInvites = pgTable("workspace_invites", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  email: text("email").notNull(),
+  emailNormalized: text("email_normalized").notNull(),
+  role: memberRole("role").notNull().default("editor"),
+  teams: jsonb("teams").$type<ReviewTeamKey[]>().notNull().default(sql`'[]'::jsonb`),
+  tokenHash: text("token_hash").notNull(),
+  invitedBy: uuid("invited_by").references(() => users.id, { onDelete: "set null" }),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+  acceptedBy: uuid("accepted_by").references(() => users.id, { onDelete: "set null" }),
+  revokedAt: timestamp("revoked_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("workspace_invites_token_uq").on(t.tokenHash),
+  index("workspace_invites_ws_email_idx").on(t.workspaceId, t.emailNormalized),
 ]);
 
 /**
@@ -599,6 +654,55 @@ export const articleRevisions = pgTable("article_revisions", {
   uniqueIndex("arev_article_version_uq").on(t.articleId, t.version),
   index("arev_ws_idx").on(t.workspaceId),
 ]);
+
+/** Review discussions are independent of the article's publishable content. */
+export const articleComments = pgTable("article_comments", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  articleId: uuid("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  authorId: uuid("author_id").references(() => users.id, { onDelete: "set null" }),
+  authorName: text("author_name").notNull(),
+  articleVersion: integer("article_version").notNull(),
+  quote: text("quote").notNull(),
+  prefix: text("prefix").notNull().default(""),
+  suffix: text("suffix").notNull().default(""),
+  startOffset: integer("start_offset").notNull(),
+  endOffset: integer("end_offset").notNull(),
+  body: text("body").notNull(),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("article_comment_ws_article_idx").on(t.workspaceId, t.articleId, t.createdAt)]);
+
+export const articleCommentReplies = pgTable("article_comment_replies", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  articleId: uuid("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  commentId: uuid("comment_id").notNull().references(() => articleComments.id, { onDelete: "cascade" }),
+  authorId: uuid("author_id").references(() => users.id, { onDelete: "set null" }),
+  authorName: text("author_name").notNull(),
+  body: text("body").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("article_comment_reply_ws_article_idx").on(t.workspaceId, t.articleId, t.createdAt)]);
+
+/**
+ * One sign-off in the team review process: who decided what, at which level,
+ * on which version.
+ *
+ * Tied to the article version, so an edit (which makes a new version) starts
+ * the levels again: an approval of the text someone read never carries over to
+ * text they did not read.
+ */
+export const articleReviews = pgTable("article_reviews", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  articleId: uuid("article_id").notNull().references(() => articles.id, { onDelete: "cascade" }),
+  articleVersion: integer("article_version").notNull(),
+  step: text("step").$type<"content" | "manager">().notNull(),
+  decision: text("decision").$type<"approved" | "changes_requested">().notNull(),
+  userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+  note: text("note"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [index("article_reviews_article_idx").on(t.workspaceId, t.articleId, t.articleVersion, t.createdAt)]);
 
 export interface GateFinding {
   severity: "info" | "warn" | "error";

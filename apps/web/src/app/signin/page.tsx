@@ -54,14 +54,23 @@ const AUTH_ERRORS: Record<string, string> = {
   email_sign_in_required: "This address uses email sign-in. Sign in with your password, or use Forgot password. Google accounts are not automatically linked for your security.",
 };
 
+/**
+ * Where to go after signing in, when a page sent the person here (an invite link does).
+ * Only a path inside this app: never another site, and never a protocol-relative "//host".
+ */
+function safeNext(value: string | undefined): string | null {
+  return value && /^\/(?![/\\])[^\s\\]{0,300}$/.test(value) ? value : null;
+}
+
 export default async function SignInPage({
   searchParams,
 }: {
-  searchParams: Promise<{ auth_error?: string }>;
+  searchParams: Promise<{ auth_error?: string; next?: string }>;
 }) {
-  if (await getSession()) redirect("/home");
+  const { auth_error: authError, next: nextParam } = await searchParams;
+  const next = safeNext(nextParam);
+  if (await getSession()) redirect(next ?? "/home");
 
-  const { auth_error: authError } = await searchParams;
   const authMessage = authError
     ? AUTH_ERRORS[authError] ?? "Sign-in did not complete. Please try again."
     : null;
@@ -118,7 +127,7 @@ export default async function SignInPage({
 
           <div className="auth-form-head">
             <h1>Welcome back</h1>
-            <p>Sign in to your workspace, or create a new one.</p>
+            <p>{next?.startsWith("/join/") ? "Sign in to accept your invite." : "Sign in to your workspace, or create a new one."}</p>
           </div>
 
           {authMessage ? (
@@ -140,7 +149,7 @@ export default async function SignInPage({
             * correctly, and the only clue was a tooltip saying Google was not
             * configured — when it was.
             */}
-          <AuthForm googleEnabled={Boolean(
+          <AuthForm next={next} googleEnabled={Boolean(
             (process.env.GOOGLE_CLIENT_ID || process.env.GOOGLE_ADS_CLIENT_ID) &&
             (process.env.GOOGLE_CLIENT_SECRET || process.env.GOOGLE_ADS_CLIENT_SECRET),
           )} />

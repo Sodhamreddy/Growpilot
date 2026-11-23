@@ -24,7 +24,7 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, email text, name text);
-    CREATE TABLE workspaces (id uuid PRIMARY KEY, owner_id uuid);
+    CREATE TABLE workspaces (id uuid PRIMARY KEY, owner_id uuid, settings jsonb NOT NULL DEFAULT '{}'::jsonb);
     CREATE TABLE workspace_members (workspace_id uuid, user_id uuid, role text, selected_business_id uuid, created_at timestamptz DEFAULT now());
     INSERT INTO users VALUES ('${state.ctx.userId}','owner@example.com','Owner'),('${editor}','editor@example.com','Editor'),('${outsider}','private@example.com','Outsider');
     INSERT INTO workspaces VALUES ('${state.ctx.workspaceId}','${state.ctx.userId}');

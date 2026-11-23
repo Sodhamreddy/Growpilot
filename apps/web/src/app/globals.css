@@ -290,6 +290,13 @@ p { margin: 0 0 1em; }
 }
 .usermenu button:hover { background: var(--danger-soft); }
 .usermenu button:disabled { opacity: 0.6; cursor: not-allowed; }
+/* Workspace switcher: only shown to someone who belongs to more than one workspace. */
+.usermenu-workspaces { display: grid; gap: 2px; padding-bottom: 5px; margin-bottom: 5px; border-bottom: 1px solid var(--border); }
+.usermenu-label { padding: 4px 10px 2px; font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-subtle); }
+.usermenu .usermenu-workspaces button { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usermenu .usermenu-workspaces button:hover { background: var(--accent-soft); }
+.usermenu .usermenu-workspaces button[aria-checked="true"] { color: var(--accent); font-weight: 600; opacity: 1; cursor: default; }
+.usermenu-error { padding: 4px 10px; font-size: 12px; color: var(--danger); }
 .userchip .avatar {
   width: 32px; height: 32px; border-radius: 50%; flex: none;
   background: var(--accent); color: var(--accent-fg);
@@ -1463,6 +1470,73 @@ table td.num, table th.num { font-variant-numeric: tabular-nums; }
 
 .tsep { width: 1px; height: 18px; background: var(--border); margin: 0 5px; }
 .tspacer { flex: 1; }
+
+/*
+ * The article editor's toolbar, laid out like Google Docs and Word
+ * (components/RichTextEditor): a rounded bar of icon buttons, a paragraph
+ * style menu, and a link box instead of the browser's prompt.
+ */
+.doctb {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+  margin: 8px 8px 0; padding: 4px 8px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 18px;
+  position: sticky; top: 0; z-index: 3;
+}
+.doctb-btn {
+  display: inline-grid; place-items: center; width: 30px; height: 30px; padding: 0;
+  border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.doctb-btn:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
+.doctb-btn[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.doctb-btn:disabled { opacity: 0.38; cursor: default; }
+.doctb-btn:focus-visible, .doctb-select:focus-visible { outline: none; box-shadow: var(--ring); }
+.doctb-sep { width: 1px; height: 20px; background: var(--border-strong); margin: 0 6px; }
+.doctb-anchor { position: relative; display: inline-flex; }
+.doctb-select {
+  display: inline-flex; align-items: center; justify-content: space-between; gap: 4px;
+  min-width: 124px; height: 30px; padding: 0 4px 0 10px;
+  border: 0; border-radius: 6px; background: transparent; color: var(--text);
+  font: 500 13.5px var(--font); cursor: pointer;
+}
+.doctb-select:hover, .doctb-select[aria-expanded="true"] { background: var(--surface-3); }
+.doctb-select svg { color: var(--text-muted); }
+.doctb-menu, .doctb-link {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 20;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow-lg);
+}
+.doctb-menu { display: grid; min-width: 210px; padding: 6px 0; }
+.doctb-menuitem {
+  position: relative; display: block; width: 100%; padding: 8px 16px 8px 36px; text-align: left;
+  border: 0; background: transparent; color: var(--text); font-family: var(--font); line-height: 1.3; cursor: pointer;
+}
+.doctb-menuitem:hover, .doctb-menuitem:focus-visible { background: var(--surface-2); outline: none; }
+.doctb-menuitem[aria-checked="true"]::before {
+  content: "✓"; position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+  font-size: 13px; font-weight: 700; color: var(--accent);
+}
+.doctb-style-p { font-size: 14px; }
+.doctb-style-h2 { font-size: 20px; font-weight: 700; }
+.doctb-style-h3 { font-size: 17px; font-weight: 700; }
+.doctb-style-h4 { font-size: 15px; font-weight: 700; }
+.doctb-linkwrap { display: inline-flex; }
+.doctb-link { display: grid; gap: 8px; width: min(340px, calc(100% - 16px)); padding: 12px; left: auto; right: 8px; }
+.doctb-link label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.doctb-link input {
+  height: 36px; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 8px;
+  background: var(--surface); color: var(--text); font: 14px var(--font);
+}
+.doctb-link input:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+.doctb-link input[aria-invalid="true"] { border-color: var(--danger); }
+.doctb-link-error { margin: 0; font-size: 12px; color: var(--danger); }
+.doctb-link-actions { display: flex; justify-content: flex-end; gap: 6px; }
+.doctb-apply, .doctb-textbtn { height: 32px; padding: 0 14px; border: 0; border-radius: 999px; font: 600 13px var(--font); cursor: pointer; }
+.doctb-apply { background: var(--accent); color: var(--accent-fg); }
+.doctb-apply:hover { background: var(--accent-hover); }
+.doctb-textbtn { background: transparent; color: var(--accent); }
+.doctb-textbtn:hover { background: var(--accent-soft); }
+.doctb-apply:focus-visible, .doctb-textbtn:focus-visible { outline: none; box-shadow: var(--ring); }
+@media (max-width: 640px) { .doctb-sep { margin: 0 3px; } .doctb-select { min-width: 108px; } }
 
 .editorwrap .tiptap {
   padding: 18px 20px;
@@ -4010,6 +4084,11 @@ a.stagecard:hover {
 .auth-form-inner .btn.primary { min-height:46px; font-size:14px; }
 .auth-terms { margin-top:14px; }
 .auth-trust { margin-top:27px; padding-top:17px; }
+/* Phones: the two 430px columns above came after the 900px rule and overrode it, so sign-in and invite pages scrolled sideways. */
+@media (max-width: 900px) {
+  .auth { grid-template-columns: minmax(0, 1fr); }
+  .auth-form-side { padding: 32px 20px; }
+}
 
 /* ─── Editing a social category ──────────────────────────────────────────── */
 
@@ -5215,3 +5294,12 @@ p.ssched-off { margin: 0; }
   .socal-wd { position: static; width: auto; height: auto; margin: 0; overflow: visible; clip: auto; white-space: normal; }
   .socal-nav h2 { min-width: 0; }
 }
+
+/* A review team member's role, in the top bar of Blog Automation (components/TopBar). */
+.topbar .teamrole {
+  display:inline-flex; align-items:center; gap:5px; white-space:nowrap;
+  font-size:12px; font-weight:650; color:#0b6b3f;
+  background:#e8f8ef; border:1px solid #bfe9d0; border-radius:999px; padding:4px 11px;
+}
+.topbar .teamrole > span { font-weight:500; color:#3f6b55; }
+@media (max-width: 640px) { .topbar .teamrole > span { display:none; } }

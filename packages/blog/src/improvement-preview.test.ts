@@ -51,7 +51,7 @@ describe("selected score improvement previews", () => {
     const result = await previewScoreImprovements({ generate } as never, tenant, input([section("1"), titleChange, section("2")]));
 
     expect(generate).toHaveBeenCalledOnce();
-    expect(generate.mock.calls[0]![1]).toMatchObject({ taskAlias: "editing_rewrite", promptVersion: "blog.score-improvements-preview.v1" });
+    expect(generate.mock.calls[0]![1]).toMatchObject({ taskAlias: "editing_rewrite", promptVersion: "blog.article-improvements-preview.v2" });
     expect(result.changes.map(change => change.suggestionId)).toEqual(["section-1", "metaTitle", "section-2"]);
     expect(result.patch.metaTitle).toBe(titleChange.value);
     expect(result.patch.bodyMarkdown).toBe([
@@ -95,17 +95,49 @@ describe("selected score improvement previews", () => {
     expect(JSON.stringify(source)).toBe(original);
   });
 
-  it.each([
-    ["missing response sections", undefined],
-    ["missing requested section", [{ sectionId: "0", content: "A clearer opening." }]],
-    ["duplicate section", [{ sectionId: "0", content: "A clearer opening." }, { sectionId: "0", content: "Another opening." }]],
-    ["unknown section", [{ sectionId: "0", content: "A clearer opening." }, { sectionId: "99", content: "Unknown content." }]],
-    ["unselected section", [{ sectionId: "0", content: "A clearer opening." }, { sectionId: "3", content: "Contact our team." }]],
-    ["malformed section", [{ sectionId: "0", content: "A clearer opening." }, { sectionId: "2", content: 12 }]],
-    ["extra section", [{ sectionId: "0", content: "A clearer opening." }, { sectionId: "2", content: "Useful questions." }, { sectionId: "3", content: "Contact our team." }]],
-  ])("rejects %s from the model", async (_label, sections) => {
-    const generate = model(sections);
+  it("fails only when the model returns nothing usable", async () => {
+    const generate = model(undefined);
     await expect(previewScoreImprovements({ generate } as never, tenant, input([section("0"), section("2")]))).rejects.toMatchObject({ code: "provider_error" });
+  });
+
+  it.each([
+    ["a missing requested section", [{ sectionId: "0", content: "A clearer opening." }]],
+    ["a repeated section", [{ sectionId: "0", content: "A clearer opening." }, { sectionId: "0", content: "Another opening." }]],
+    ["an unknown section", [{ sectionId: "0", content: "A clearer opening." }, { sectionId: "99", content: "Unknown content." }]],
+    ["an unselected section", [{ sectionId: "0", content: "A clearer opening." }, { sectionId: "3", content: "Contact our team." }]],
+    ["a malformed section", [{ sectionId: "0", content: "A clearer opening." }, { sectionId: "2", content: 12 }]],
+  ])("keeps the usable change and skips the other when the model returns %s", async (_label, sections) => {
+    const result = await previewScoreImprovements({ generate: model(sections) } as never, tenant, input([section("0"), section("2")]));
+    expect(result.changes[0]).toMatchObject({ sectionId: "0", after: "A clearer opening.", changed: true });
+    expect(result.changes[1]).toMatchObject({ sectionId: "2", changed: false, skipped: expect.any(String) });
+    expect(result.changes[1]!.after).toBe(result.changes[1]!.before);
+    expect(result.patch.bodyMarkdown).toContain("A clearer opening.");
+    expect(result.patch.bodyMarkdown).toContain("Write down the family's questions.");
+  });
+
+  it("ignores extra sections the model was not asked for", async () => {
+    const result = await previewScoreImprovements({ generate: model([{ sectionId: "0", content: "A clearer opening." },
+      { sectionId: "2", content: "Useful questions." }, { sectionId: "3", content: "Contact our team." }]) } as never, tenant, input([section("0"), section("2")]));
+    expect(result.changes.every(change => change.changed && !change.skipped)).toBe(true);
+    expect(result.patch.bodyMarkdown).toContain("Contact the care team to discuss your priorities.");
+  });
+
+  it("skips an unsafe section with its reason and keeps the safe ones", async () => {
+    const result = await previewScoreImprovements({ generate: model([
+      { sectionId: "1", content: "Discuss daily routines. [Our services](/services)" },
+      { sectionId: "2", content: "List the questions you want to discuss with the care team." },
+    ]) } as never, tenant, input([section("1"), section("2")]));
+    expect(result.changes[0]).toMatchObject({ changed: false, skipped: "AI removed or changed a link, so the original text was kept." });
+    expect(result.changes[1]).toMatchObject({ changed: true });
+    expect(result.patch.bodyMarkdown).toContain("[Care options](https://care.example/options)");
+  });
+
+  it("recomposes a narrower selection from changes prepared earlier, without another AI request", () => {
+    const prepared = [{ sectionId: "1", content: linkedBody }, { sectionId: "2", content: "List the questions you want to discuss with the care team." }];
+    const result = composeScoreImprovementPreview(article, [section("2")], prepared);
+    expect(result.changes).toEqual([expect.objectContaining({ sectionId: "2", changed: true })]);
+    expect(result.patch.bodyMarkdown).toContain("Discuss daily routines.");
+    expect(result.patch.bodyMarkdown).toContain("List the questions you want to discuss with the care team.");
   });
 
   it.each([

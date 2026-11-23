@@ -268,3 +268,16 @@ describe("budget reservation before provider work", () => {
     expect(recordJob).toHaveBeenCalledWith(expect.objectContaining({ reservationId: "reservation-1", taskAlias: "embedding" }));
   });
 });
+
+describe("Gateway — a used-up daily allowance", () => {
+  it("says so plainly instead of 'unavailable', and does not retry", async () => {
+    const quota = vi.fn(async () => {
+      throw new AppError("rate_limited", "Your Google AI key has used its free daily allowance (20 requests a day).", { retryable: false });
+    });
+    const g = new Gateway(deps(new Map([["anthropic", stubProvider("anthropic", { generate: quota })]])));
+    await expect(g.generate(ctx, request)).rejects.toMatchObject({
+      code: "rate_limited", retryable: false, message: expect.stringContaining("free daily allowance"),
+    });
+    expect(quota).toHaveBeenCalledTimes(2); // once per binding, never retried on the same one
+  });
+});

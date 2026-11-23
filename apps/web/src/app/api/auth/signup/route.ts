@@ -3,18 +3,13 @@ export const dynamic = "force-dynamic";
 import { z } from "zod";
 import { publicRoute, parseBody } from "@/lib/api";
 import { signUpWithEmail, createSession } from "@/lib/auth";
+import { newPasswordSchema } from "@/lib/password-rules";
 
 /** POST /api/auth/signup — spec §14. */
 
 const schema = z.object({
   email: z.string().email("Enter a valid email address."),
-  password: z.string()
-    .min(8, "Use at least 8 characters.")
-    .max(200)
-    .regex(/[A-Z]/, "Add one uppercase letter.")
-    .regex(/[a-z]/, "Add one lowercase letter.")
-    .regex(/[0-9]/, "Add one number.")
-    .regex(/[^A-Za-z0-9]/, "Add one special character."),
+  password: newPasswordSchema,
   name: z.string().min(1).max(120).optional(),
   workspaceName: z.string().min(1).max(120).optional(),
 });

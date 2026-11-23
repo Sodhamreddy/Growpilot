@@ -51,9 +51,21 @@ export class GoogleProvider implements AiProvider {
       parts: [{ text: m.content }],
     }));
 
+    /*
+     * Gemini 2.5+ counts its internal "thinking" against maxOutputTokens.
+     *
+     * A caller's maxTokens is the answer it needs, so thinking gets its own
+     * bounded allowance on top. Without it a small limit is spent thinking and
+     * the answer is cut off mid-sentence: the content-quality review (1,200
+     * tokens) stopped after ~40 tokens every time, so its JSON never parsed
+     * and every article's content score sat at the "unreviewed" cap.
+     */
+    const answerTokens = req.maxTokens ?? 8_000;
+    const thinks = thinkingModel(model);
     const config: Record<string, unknown> = {
       systemInstruction: req.system,
-      maxOutputTokens: req.maxTokens ?? 8_000,
+      maxOutputTokens: answerTokens + (thinks ? THINKING_BUDGET : 0),
+      ...(thinks ? { thinkingConfig: { thinkingBudget: THINKING_BUDGET } } : {}),
       abortSignal: signal,
     };
 
@@ -84,9 +96,17 @@ export class GoogleProvider implements AiProvider {
     }
 
     const usage = res.usageMetadata;
+    const parsed = req.schema ? safeParseJson(text) : undefined;
+    // A structured answer cut off by the length limit is incomplete JSON. Say
+    // so, retryably, instead of handing the caller "no result" to misread.
+    if (req.schema && parsed === undefined && res.candidates?.[0]?.finishReason === "MAX_TOKENS") {
+      throw new AppError("provider_error", "The AI's answer was cut off before it finished.", {
+        details: { finishReason: "MAX_TOKENS", outputTokens: usage?.candidatesTokenCount ?? 0 }, retryable: true,
+      });
+    }
     return {
       text,
-      parsed: req.schema ? safeParseJson(text) : undefined,
+      parsed,
       usage: {
         inputTokens: usage?.promptTokenCount ?? 0,
         outputTokens: usage?.candidatesTokenCount ?? 0,
@@ -268,6 +288,14 @@ export function toGeminiSchema(schema: Record<string, unknown>): Record<string, 
   return cleaned;
 }
 
+/** Tokens Gemini may spend thinking before it answers; added on top of the answer's own limit. */
+export const THINKING_BUDGET = 8_192;
+
+/** Models that think by default. The "lite" models do not unless asked. */
+export function thinkingModel(model: string): boolean {
+  return /^gemini-(2\.5|[3-9])/.test(model) && !/lite/.test(model);
+}
+
 function safeParseJson(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -315,6 +343,18 @@ function translateError(err: unknown): AppError {
 
   if (e?.name === "AbortError" || /abort/i.test(message)) {
     return new AppError("provider_timeout", "The AI request timed out.", { cause: err, retryable: true });
+  }
+  /*
+   * A free-tier key's daily allowance is not a momentary rate limit: retrying
+   * cannot help until Google resets it (about a day), and every AI feature in
+   * the app shares it. Say so plainly, with the fix, and stop retrying.
+   */
+  if ((status === 429 || /quota/i.test(message)) && /free_?tier|PerDay/i.test(message)) {
+    const limit = /quotaValue\\?"?:\s*\\?"?(\d+)/.exec(message)?.[1];
+    return new AppError("rate_limited",
+      `Your Google AI key has used its free daily allowance${limit ? ` (${limit} requests a day)` : ""}. ` +
+      "AI features work again when Google resets it, or right away once billing is turned on for the key's Google Cloud project.",
+      { cause: err, details: { quota: "daily_free_tier", ...(limit ? { limit: Number(limit) } : {}) }, retryable: false });
   }
   if (status === 429 || /quota|rate limit/i.test(message)) {
     return new AppError("rate_limited", "The AI provider is rate limiting us. Retrying shortly.", {

@@ -20,6 +20,12 @@ const gatewayFor = (semantic: unknown) => ({ generate: vi.fn(async (_ctx, reques
   : { parsed: semantic }) });
 
 describe("actual semantic content review", () => {
+  it("keeps an unconfigured brand voice unmeasured instead of manufacturing a score of zero", async () => {
+    const result = await runAllGates(gatewayFor(quality) as never, tenant, { ...context, voice: null });
+    expect(result.voiceScore).toBeNull();
+    expect(result.gates.find(gate => gate.gate === "brand")).toMatchObject({ verdict: "warn", score: null });
+    expect(result.gates.find(gate => gate.gate === "publishing")?.findings.some(finding => finding.message.includes("Brand voice score is 0"))).toBe(false);
+  });
   it("supplies measured semantic scores to the weighted scorer instead of keeping the artificial cap", async () => {
     const low = gatewayFor({ ...quality, intentAlignment: 0, topicalDepth: 0, originality: 0 });
     const high = gatewayFor({ ...quality, intentAlignment: 100, topicalDepth: 100, originality: 100 });
